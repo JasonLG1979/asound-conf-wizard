@@ -1,0 +1,26 @@
+[package]
+name = "asound_conf_wizard"
+description = "Generate a /etc/asound.conf based on user choices"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Jason Gray"]
+rust-version = "1.64"
+
+[[bin]]
+name = "awiz"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+which = "4.3.0"
+glob = "0.3.0"
+alsa = "0.6"
+comfy-table = "6.1"
+colored = "2"
+
+[profile.default]
+inherits = "release"
+panic = "abort"
+codegen-units = 1
+lto = true
