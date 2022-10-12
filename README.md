@@ -41,7 +41,7 @@ A binary named `awiz` will be in `./target/default/`
 
 asound-conf-wizard requires write privileges to `/etc`.
 
-Other then that, basically just run the bonary and follow the prompts.
+Other then that, basically just run the binary and follow the prompts.
 
 ## Limitations
 
