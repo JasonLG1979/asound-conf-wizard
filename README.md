@@ -8,6 +8,7 @@ It will **NOT** run on systems that have PulseAudio, Jack Audio or PipeWire inst
 
 You should use those to configure audio if they are installed.
 
+![screen-shot](https://github.com/JasonLG1979/asound-conf-wizard/blob/main/Screenshot.png)
 ## Building
 
 ### Install Rust
