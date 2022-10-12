@@ -45,4 +45,4 @@ Other then that, basically just run the bonary and follow the prompts.
 
 ## Limitations
 
-asound-conf-wizard is intentionally very simple and it generates a very basic `/etc/asound.conf` that (ideally) creates default duplex device with full software conversion and mixing. If your use case is more niche and/or complex then that asound-conf-wizard is not for you.
+asound-conf-wizard is intentionally very simple and it generates a very basic `/etc/asound.conf` that (ideally) creates a default duplex device with full software conversion and mixing. If your use case is more niche and/or complex then that asound-conf-wizard is not for you.
