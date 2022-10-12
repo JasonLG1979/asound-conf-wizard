@@ -46,3 +46,5 @@ Other then that, basically just run the binary and follow the prompts.
 ## Limitations
 
 asound-conf-wizard is intentionally very simple and it generates a very basic `/etc/asound.conf` that (ideally) creates a default duplex device with full software conversion and mixing. If your use case is more niche and/or complex then that asound-conf-wizard is not for you.
+
+asound-conf-wizard suports `hw:`, `hdmi:` `iec958:` ALSA PCMs, `U8` and depending on the platform either the `LE` or `BE` varants of `S16`, `S24_3`, `S24` and `S32` formats and any number of channels and sampling rates. Basically it supports what `dmix` and `dsnoop` both support. 
