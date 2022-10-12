@@ -4,6 +4,10 @@ asound-conf-wizard is an interactive utility that generates a very simple `/etc/
 
 It is designed to be used on headless sytems that run bare ALSA.
 
+It will **NOT** run on systems that have PulseAudio, Jack Audio or PipeWire installed. **That is by design.**
+
+You should use those to configure audio if they are installed.
+
 ## Building
 
 ### Install Rust
