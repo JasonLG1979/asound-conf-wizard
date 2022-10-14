@@ -24,7 +24,7 @@ use colored::*;
 use glob::glob;
 use which::which;
 
-const FORMATS: &[AudioFormat] = &[
+const FORMATS: [AudioFormat; 5] = [
     AudioFormat::U8,
     AudioFormat::S16,
     AudioFormat::S24_3,
@@ -32,7 +32,7 @@ const FORMATS: &[AudioFormat] = &[
     AudioFormat::S32,
 ];
 
-const RATES: &[u32] = &[
+const RATES: [u32; 14] = [
     8000, 11025, 16000, 22050, 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600,
     768000,
 ];
@@ -194,24 +194,20 @@ impl ThreadManager {
             .trim()
             .to_string();
 
-        let job_sent = {
-            let mut job_sent = false;
-            let mut bad_worker = false;
+        let mut job_sent = false;
+        let mut bad_worker = false;
 
-            for worker in self.workers.iter_mut() {
-                if worker.card_name == card_name {
-                    job_sent = worker.add_job(name, &card_name, description, direction);
-                    bad_worker = !job_sent;
-                }
+        for worker in self.workers.iter_mut() {
+            if worker.card_name == card_name {
+                job_sent = worker.add_job(name, &card_name, description, direction);
+                bad_worker = !job_sent;
             }
+        }
 
-            if bad_worker {
-                // Drop the worker if it exists but add_job fails.
-                self.workers.retain(|worker| worker.card_name != card_name);
-            }
-
-            job_sent
-        };
+        if bad_worker {
+            // Drop the worker if it exists but add_job fails.
+            self.workers.retain(|worker| worker.card_name != card_name);
+        }
 
         if !job_sent {
             let mut worker = ThreadWorker::new(card_name.clone());
@@ -438,8 +434,8 @@ impl AlsaPcm {
 
                 if let Ok(hwp) = HwParams::any(&pcm) {
                     for f in FORMATS {
-                        if hwp.test_format(Format::from(*f)).is_ok() {
-                            formats.push(*f)
+                        if hwp.test_format(Format::from(f)).is_ok() {
+                            formats.push(f)
                         }
                     }
 
@@ -461,8 +457,8 @@ impl AlsaPcm {
                                 rates.clear();
 
                                 for r in RATES {
-                                    if hwp.test_rate(*r).is_ok() {
-                                        rates.push(*r)
+                                    if hwp.test_rate(r).is_ok() {
+                                        rates.push(r)
                                     }
                                 }
                                 break;
@@ -545,7 +541,7 @@ impl AlsaPcm {
     fn test_params(
         name: &str,
         direction: Direction,
-        audio_format: AudioFormat,
+        format: Format,
         rate: Option<u32>,
         channels: Option<u32>,
     ) -> bool {
@@ -555,16 +551,44 @@ impl AlsaPcm {
         // have to create new ones from scratch.
         if let Ok(pcm) = PCM::new(name, direction, false) {
             if let Ok(hwp) = HwParams::any(&pcm) {
-                let alsa_format = Format::from(audio_format);
-
-                let _ = hwp.set_format(alsa_format);
+                match hwp.set_format(format) {
+                    Err(_) => return false,
+                    Ok(_) => match hwp.get_format() {
+                        Err(_) => return false,
+                        Ok(actual_format) => {
+                            if actual_format != format {
+                                return false;
+                            }
+                        }
+                    },
+                }
 
                 if let Some(rate) = rate {
-                    let _ = hwp.set_rate(rate, ValueOr::Nearest);
+                    match hwp.set_rate(rate, ValueOr::Nearest) {
+                        Err(_) => return false,
+                        Ok(_) => match hwp.get_rate() {
+                            Err(_) => return false,
+                            Ok(actual_rate) => {
+                                if actual_rate != rate {
+                                    return false;
+                                }
+                            }
+                        },
+                    }
                 }
 
                 if let Some(channels) = channels {
-                    let _ = hwp.set_channels(channels);
+                    match hwp.set_channels(channels) {
+                        Err(_) => return false,
+                        Ok(_) => match hwp.get_channels() {
+                            Err(_) => return false,
+                            Ok(actual_channels) => {
+                                if actual_channels != channels {
+                                    return false;
+                                }
+                            }
+                        },
+                    }
                 }
 
                 return pcm.hw_params(&hwp).is_ok();
@@ -585,14 +609,15 @@ impl AlsaPcm {
         let mut configs = Vec::with_capacity(possible_num_configs);
 
         for format in &pcm.formats {
-            if Self::test_params(&pcm.name, pcm.direction, *format, None, None) {
+            let alsa_format = Format::from(*format);
+            if Self::test_params(&pcm.name, pcm.direction, alsa_format, None, None) {
                 for rate in &pcm.rates {
-                    if Self::test_params(&pcm.name, pcm.direction, *format, Some(*rate), None) {
+                    if Self::test_params(&pcm.name, pcm.direction, alsa_format, Some(*rate), None) {
                         for channels in &pcm.channels {
                             if Self::test_params(
                                 &pcm.name,
                                 pcm.direction,
-                                *format,
+                                alsa_format,
                                 Some(*rate),
                                 Some(*channels),
                             ) {
@@ -901,8 +926,8 @@ fn get_rate_converters() -> Vec<String> {
 }
 
 fn permission_check(now: &str) {
-    // The most effective and least fragile way to see if
-    // if have write privileges to /etc is to just try to
+    // The most effective and least brittle way to see if
+    // we have write privileges to /etc is to just try to
     // write a dummy file in /etc.
     let path = DUMMY_FILE_PATH_TEMPLATE.replace("{now}", now);
     if let Err(e) = File::create(path.clone()) {
@@ -1065,23 +1090,17 @@ fn write_asound_conf(config: String) {
 
                 println!(
                     "{}",
-                    "or revert it from the back up, if one was created,".cyan()
+                    "or revert it from the back up, if one was created, if you have any issues with the generated config.".cyan()
                 );
 
                 println!(
                     "{}",
-                    "if you have any issues with the generated config.".cyan()
+                    "\nif you found this utility useful, and feel so inclined, you can buy me a RedBull at:".cyan()
                 );
 
                 println!(
                     "{}",
-                    "\nif you found this utility useful, and feel so inclined, you can buy me a RedBull".cyan()
-                );
-
-                println!(
-                    "{} {}",
-                    "by sponsoring me at GitHub:".cyan(),
-                    "https://github.com/sponsors/JasonLG1979".bold().cyan()
+                    "\nhttps://github.com/sponsors/JasonLG1979".bold().cyan()
                 );
 
                 println!("{}", "\nThanks, and happy listening!!!\n".bold().cyan());
@@ -1167,7 +1186,7 @@ fn main() {
 
     println!(
         "\n{}",
-        "If you any questions, issues, or would like to contribute to this project.".cyan()
+        "If you have any questions, issues, or would like to contribute to this project.".cyan()
     );
 
     let confirm = user_input("Please Enter \"OK\" to Continue: ").to_lowercase();
