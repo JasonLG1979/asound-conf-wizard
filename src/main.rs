@@ -813,11 +813,25 @@ fn show_list<T: std::fmt::Display>(list: &[T]) {
         .set_content_arrangement(ContentArrangement::Dynamic)
         .set_width(100);
 
-    if list.len() == 1 {
+    let list_len = list.len();
+
+    if list_len == 1 {
         table.add_row(vec![Cell::new(format!("{}", list[0]))]);
     } else {
+        let content_width = list
+            .iter()
+            .map(|x| x.to_string().len())
+            .max()
+            .unwrap_or_default();
+
+        let index_width = list_len.to_string().len();
+
         for (i, item) in list.iter().enumerate() {
-            table.add_row(vec![Cell::new(format!("{} - {item}", i + 1))]);
+            table.add_row(vec![Cell::new(format!(
+                "{:<index_width$} │ {:>content_width$}",
+                i + 1,
+                item
+            ))]);
         }
     }
 
