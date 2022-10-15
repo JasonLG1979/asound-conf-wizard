@@ -1,9 +1,12 @@
 [package]
 name = "asound-conf-wizard"
 description = "asound-conf-wizard"
+homepage = "https://github.com/JasonLG1979/asound-conf-wizard"
+repository = "https://github.com/JasonLG1979/asound-conf-wizard"
 version = "0.1.1"
 edition = "2021"
 license = "MIT"
+license-file = "LICENSE"
 authors = ["Jason Gray"]
 rust-version = "1.64"
 readme = "README.md"
