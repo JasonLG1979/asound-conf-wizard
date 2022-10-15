@@ -22,4 +22,4 @@ Other then that, basically just run the binary and follow the prompts.
 
 ![screen-shot](https://github.com/JasonLG1979/asound-conf-wizard/blob/main/Screenshot.png)
 ## Building
-See the [Building the Binary or Package(s) Yourself](https://github.com/JasonLG1979/asound-conf-wizard/wiki/Building-the-Binary-or-Package(s)-Yourself) for build instructions.
+See the [Building the Binary or Package(s) Yourself](https://github.com/JasonLG1979/asound-conf-wizard/wiki/Building-the-Binary-or-Package(s)-Yourself) wiki page for build instructions.
