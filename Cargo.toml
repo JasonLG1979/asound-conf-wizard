@@ -30,7 +30,6 @@ lto = true
 name = "asound-conf-wizard"
 maintainer = "Jason Gray <jasonlevigray3@gmail.com>"
 copyright = "2022 Jason Gray <jasonlevigray3@gmail.com>"
-description = "An interactive utility that generates a very simple /etc/asound.conf."
 extended-description = """\
 An interactive utility that generates a very simple /etc/asound.conf. \
 It is designed to be used on headless sytems that run bare ALSA. \
