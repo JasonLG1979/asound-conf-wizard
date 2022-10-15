@@ -1,6 +1,6 @@
 [package]
 name = "asound-conf-wizard"
-description = "An interactive utility that generates a very simple /etc/asound.conf."
+description = "asound-conf-wizard"
 version = "0.1.1"
 edition = "2021"
 license = "MIT"
