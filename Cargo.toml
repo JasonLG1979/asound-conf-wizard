@@ -1,5 +1,5 @@
 [package]
-name = "asound_conf_wizard"
+name = "asound-conf-wizard"
 description = "Generate a /etc/asound.conf based on user choices"
 version = "0.1.0"
 edition = "2021"
