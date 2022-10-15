@@ -6,7 +6,6 @@ repository = "https://github.com/JasonLG1979/asound-conf-wizard"
 version = "0.1.1"
 edition = "2021"
 license = "MIT"
-license-file = "LICENSE"
 authors = ["Jason Gray"]
 rust-version = "1.64"
 readme = "README.md"
@@ -38,7 +37,6 @@ An interactive utility that generates a very simple /etc/asound.conf. \
 It is designed to be used on headless sytems that run bare ALSA. \
 It will NOT run on systems that have PulseAudio, Jack Audio or PipeWire installed. That is by design. \
 You should use those to configure audio if they are installed."""
-license-file = ["LICENSE", "0"]
 depends = "libc6 (>= 2.31), libasound2 (>= 1.2.4)"
 priority = "optional"
 section = "base"
