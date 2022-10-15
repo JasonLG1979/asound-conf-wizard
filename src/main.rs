@@ -431,60 +431,61 @@ impl AlsaPcm {
                 if device_number != vdevice_number {
                     is_real_hw = false;
                 }
-
                 if let Ok(hwp) = HwParams::any(&pcm) {
-                    for f in FORMATS {
-                        if hwp.test_format(Format::from(f)).is_ok() {
-                            formats.push(f)
-                        }
-                    }
-
-                    let min_rate = hwp.get_rate_min().unwrap_or(8000).max(8000);
-                    let max_rate = hwp.get_rate_max().unwrap_or(768000).min(768000);
-
-                    for r in min_rate..=max_rate {
-                        if hwp.test_rate(r).is_ok() {
-                            if rates.len() != rates.capacity() {
-                                rates.push(r);
-                            } else {
-                                // Device with conversion. Retest with limited range.
-                                //
-                                // Devices with rate conversion will say they support
-                                // every single sampling rate in min_rate..=max_rate.
-                                // We don't want a list of 764000 different available
-                                // sampling rates.
-                                is_real_hw = false;
-                                rates.clear();
-
-                                for r in RATES {
-                                    if hwp.test_rate(r).is_ok() {
-                                        rates.push(r)
-                                    }
-                                }
-                                break;
+                    if hwp.set_rate_resample(false).is_ok() {
+                        for f in FORMATS {
+                            if hwp.test_format(Format::from(f)).is_ok() {
+                                formats.push(f)
                             }
                         }
-                    }
 
-                    let min_channels = hwp.get_channels_min().unwrap_or(1).max(1);
-                    let max_channels = hwp.get_channels_max().unwrap_or(255).min(255);
+                        let min_rate = hwp.get_rate_min().unwrap_or(8000).max(8000);
+                        let max_rate = hwp.get_rate_max().unwrap_or(768000).min(768000);
 
-                    for c in min_channels..=max_channels {
-                        if hwp.test_channels(c).is_ok() {
-                            if channels.len() != channels.capacity() {
-                                channels.push(c);
-                            } else {
-                                // Device with conversion. Retest with limited range. Same as above.
-                                // We don't need a huge list of available channel counts.
-                                is_real_hw = false;
-                                channels.clear();
+                        for r in min_rate..=max_rate {
+                            if hwp.test_rate(r).is_ok() {
+                                if rates.len() != rates.capacity() {
+                                    rates.push(r);
+                                } else {
+                                    // Device with conversion. Retest with limited range.
+                                    //
+                                    // Devices with rate conversion will say they support
+                                    // every single sampling rate in min_rate..=max_rate.
+                                    // We don't want a list of 764000 different available
+                                    // sampling rates.
+                                    is_real_hw = false;
+                                    rates.clear();
 
-                                for c in CHANNELS {
-                                    if hwp.test_channels(c).is_ok() {
-                                        channels.push(c)
+                                    for r in RATES {
+                                        if hwp.test_rate(r).is_ok() {
+                                            rates.push(r)
+                                        }
                                     }
+                                    break;
                                 }
-                                break;
+                            }
+                        }
+
+                        let min_channels = hwp.get_channels_min().unwrap_or(1).max(1);
+                        let max_channels = hwp.get_channels_max().unwrap_or(255).min(255);
+
+                        for c in min_channels..=max_channels {
+                            if hwp.test_channels(c).is_ok() {
+                                if channels.len() != channels.capacity() {
+                                    channels.push(c);
+                                } else {
+                                    // Device with conversion. Retest with limited range. Same as above.
+                                    // We don't need a huge list of available channel counts.
+                                    is_real_hw = false;
+                                    channels.clear();
+
+                                    for c in CHANNELS {
+                                        if hwp.test_channels(c).is_ok() {
+                                            channels.push(c)
+                                        }
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }
@@ -551,6 +552,18 @@ impl AlsaPcm {
         // have to create new ones from scratch.
         if let Ok(pcm) = PCM::new(name, direction, false) {
             if let Ok(hwp) = HwParams::any(&pcm) {
+                match hwp.set_rate_resample(false) {
+                    Err(_) => return false,
+                    Ok(_) => match hwp.get_rate_resample() {
+                        Err(_) => return false,
+                        Ok(actual_rate_resample) => {
+                            if actual_rate_resample != false {
+                                return false;
+                            }
+                        }
+                    },
+                }
+
                 match hwp.set_format(format) {
                     Err(_) => return false,
                     Ok(_) => match hwp.get_format() {

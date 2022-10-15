@@ -24,3 +24,14 @@ inherits = "release"
 panic = "abort"
 codegen-units = 1
 lto = true
+
+[package.metadata.deb]
+name = "asound-conf-wizard"
+maintainer = "Jason Gray <jasonlevigray3@gmail.com>"
+copyright = "2022 Jason Gray <jasonlevigray3@gmail.com>"
+license-file = ["LICENSE", "0"]
+depends = "libc6 (>= 2.31), libasound2 (>= 1.2.4)"
+priority = "optional"
+section = "base"
+extended-description = """\
+An interactive utility that generates a very simple /etc/asound.conf."""
