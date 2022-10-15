@@ -62,7 +62,7 @@ They depend on:
 * [libc6 (>= 2.31)](https://tracker.debian.org/pkg/libc6)
 * [libasound2 (>= 1.2.4)](https://tracker.debian.org/pkg/libasound2)
 
-### Build just for your Machines Architecture
+### Build just for your Machine's Architecture
 #### Install Rust
 ```
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
