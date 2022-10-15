@@ -1,11 +1,12 @@
 [package]
 name = "asound-conf-wizard"
-description = "Generate a /etc/asound.conf based on user choices"
-version = "0.1.0"
+description = "An interactive utility that generates a very simple /etc/asound.conf."
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 authors = ["Jason Gray"]
 rust-version = "1.64"
+readme = "README.md"
 
 [[bin]]
 name = "awiz"
@@ -33,5 +34,3 @@ license-file = ["LICENSE", "0"]
 depends = "libc6 (>= 2.31), libasound2 (>= 1.2.4)"
 priority = "optional"
 section = "base"
-extended-description = """\
-An interactive utility that generates a very simple /etc/asound.conf."""

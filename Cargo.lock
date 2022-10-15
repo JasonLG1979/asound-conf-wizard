@@ -25,8 +25,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "asound_conf_wizard"
-version = "0.1.0"
+name = "asound-conf-wizard"
+version = "0.1.1"
 dependencies = [
  "alsa",
  "colored",
