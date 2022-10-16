@@ -557,7 +557,7 @@ impl AlsaPcm {
                     Ok(_) => match hwp.get_rate_resample() {
                         Err(_) => return false,
                         Ok(actual_rate_resample) => {
-                            if actual_rate_resample != false {
+                            if actual_rate_resample {
                                 return false;
                             }
                         }
