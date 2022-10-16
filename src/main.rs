@@ -1310,7 +1310,7 @@ fn main() {
             }
 
             let config = {
-                let config = choose_a_configuration(playback_pcm.valid_configurations);
+                let config = choose_a_configuration(playback_pcm.valid_configurations.clone());
 
                 show_configuration(&config);
 
@@ -1364,7 +1364,7 @@ fn main() {
             }
 
             let config = {
-                let config = choose_a_configuration(capture_pcm.valid_configurations);
+                let config = choose_a_configuration(capture_pcm.valid_configurations.clone());
 
                 show_configuration(&config);
 
