@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     fmt, fs,
     fs::File,
     io::{stdin, stdout, Write},
@@ -45,6 +46,7 @@ const CONFLICTING_SOFTWARE: [[&str; 2]; 3] = [
 ];
 
 const CHANNELS: RangeInclusive<u32> = 1..=12;
+const BUFFER_TIMES: RangeInclusive<u32> = 5000..=500000;
 
 const ASOUND_FILE_PATH: &str = "/etc/asound.conf";
 const DUMMY_FILE_PATH_TEMPLATE: &str = "/etc/foobarbaz{now}";
@@ -83,6 +85,11 @@ pcm.{playback_capture} {
             device {device}
             subdevice {sub_device}
         }
+        period_size 0
+        buffer_size 0
+        periods 0
+        buffer_time {buffer_time}
+        period_time {period_time}
         channels {channels}
         rate {rate}
         format {fmt}
@@ -358,6 +365,7 @@ struct ValidConfiguration {
     pub format: AudioFormat,
     pub rate: u32,
     pub channels: u32,
+    pub buffer_time_ms: u32,
 }
 
 impl ValidConfiguration {
@@ -373,7 +381,104 @@ impl ValidConfiguration {
             format,
             rate,
             channels,
+            buffer_time_ms: 0,
         }
+    }
+
+    pub fn get_buffer_times_ms(&mut self) -> Vec<u32> {
+        let mut buffer_times_ms = Vec::with_capacity(100);
+
+        for buffer_time in BUFFER_TIMES.step_by(5000) {
+            let period_time = buffer_time / 5;
+
+            if self.test_buffer_times(buffer_time, period_time) {
+                buffer_times_ms.push(buffer_time / 1000);
+            }
+        }
+
+        buffer_times_ms
+    }
+
+    fn test_buffer_times(&mut self, buffer_time: u32, period_time: u32) -> bool {
+        // It's basically all or nothing with PCMs and HwParams.
+        // Once they are in an error state they can't be reused.
+        // So every time we test a combination of params we
+        // have to create new ones from scratch.
+        let format = Format::from(self.format);
+
+        if let Ok(pcm) = PCM::new(&self.name, self.direction, false) {
+            if let Ok(hwp) = HwParams::any(&pcm) {
+                match hwp.set_rate_resample(false) {
+                    Err(_) => return false,
+                    Ok(_) => match hwp.get_rate_resample() {
+                        Err(_) => return false,
+                        Ok(actual_rate_resample) => {
+                            if actual_rate_resample {
+                                return false;
+                            }
+                        }
+                    },
+                }
+
+                match hwp.set_format(format) {
+                    Err(_) => return false,
+                    Ok(_) => match hwp.get_format() {
+                        Err(_) => return false,
+                        Ok(actual_format) => {
+                            if actual_format != format {
+                                return false;
+                            }
+                        }
+                    },
+                }
+
+                match hwp.set_rate(self.rate, ValueOr::Nearest) {
+                    Err(_) => return false,
+                    Ok(_) => match hwp.get_rate() {
+                        Err(_) => return false,
+                        Ok(actual_rate) => {
+                            if actual_rate != self.rate {
+                                return false;
+                            }
+                        }
+                    },
+                }
+
+                match hwp.set_channels(self.channels) {
+                    Err(_) => return false,
+                    Ok(_) => match hwp.get_channels() {
+                        Err(_) => return false,
+                        Ok(actual_channels) => {
+                            if actual_channels != self.channels {
+                                return false;
+                            }
+                        }
+                    },
+                }
+
+                match hwp.set_buffer_time_near(buffer_time, ValueOr::Nearest) {
+                    Err(_) => return false,
+                    Ok(actual_buffer_time) => {
+                        if actual_buffer_time != buffer_time {
+                            return false;
+                        }
+                    }
+                }
+
+                match hwp.set_period_time_near(period_time, ValueOr::Nearest) {
+                    Err(_) => return false,
+                    Ok(actual_period_time) => {
+                        if actual_period_time != period_time {
+                            return false;
+                        }
+                    }
+                }
+
+                return pcm.hw_params(&hwp).is_ok();
+            }
+        }
+
+        false
     }
 }
 
@@ -837,7 +942,48 @@ fn choose_a_configuration(mut configs: Vec<ValidConfiguration>) -> ValidConfigur
         configs.retain(|config| config.channels == channels);
     }
 
-    configs[0].clone()
+    let mut config = configs[0].clone();
+
+    if config.is_real_hw {
+        println!(
+            "{}",
+            "\nRetrieving Buffer parameters. This may take a moment…".cyan()
+        );
+
+        let buffer_times_ms = config.get_buffer_times_ms();
+
+        let buffer_times_ms_len = buffer_times_ms.len();
+
+        match buffer_times_ms_len.cmp(&1) {
+            Ordering::Greater => {
+                println!(
+                    "{}",
+                    "\nThe following Buffer Times in milliseconds are available.".cyan()
+                );
+
+                show_list(&buffer_times_ms);
+
+                let buffer_times_ms_index = pick_a_number(
+                    "Please Choose a Buffer Time in milliseconds: ",
+                    buffer_times_ms_len,
+                );
+
+                config.buffer_time_ms = buffer_times_ms[buffer_times_ms_index];
+            }
+            Ordering::Equal => {
+                println!(
+                    "{}",
+                    "\nThere is only one available Buffer Time in milliseconds…".cyan()
+                );
+
+                show_list(&buffer_times_ms);
+                config.buffer_time_ms = buffer_times_ms[0];
+            }
+            _ => (),
+        }
+    }
+
+    config
 }
 
 fn show_list<T: std::fmt::Display>(list: &[T]) {
@@ -897,6 +1043,13 @@ fn show_configuration(config: &ValidConfiguration) {
         .add_row(vec![Cell::new(format!("FORMAT: {}", config.format))])
         .add_row(vec![Cell::new(format!("RATE: {}", config.rate))])
         .add_row(vec![Cell::new(format!("CHANNELS: {}", config.channels))]);
+
+    if config.buffer_time_ms > 0 {
+        table.add_row(vec![Cell::new(format!(
+            "BUFFER TIME MS: {}",
+            config.buffer_time_ms
+        ))]);
+    }
 
     println!("\n{table}");
 }
@@ -1040,6 +1193,14 @@ fn build_asound_conf(
         if config.is_real_hw {
             output_pcm = "\"playback\"".to_string();
 
+            let buffer_time = if config.buffer_time_ms > 0 {
+                config.buffer_time_ms * 1000
+            } else {
+                5000
+            };
+
+            let period_time = buffer_time / 5;
+
             let dmix = PLAYBACK_CAPTURE_TEMPLATE
                 .replace("{playback_capture}", "playback")
                 .replace("{dmix_dsnoop}", "dmix")
@@ -1048,7 +1209,9 @@ fn build_asound_conf(
                 .replace("{sub_device}", &config.sub_device_number.to_string())
                 .replace("{channels}", &config.channels.to_string())
                 .replace("{rate}", &config.rate.to_string())
-                .replace("{fmt}", &config.format.to_string());
+                .replace("{fmt}", &config.format.to_string())
+                .replace("{buffer_time}", &buffer_time.to_string())
+                .replace("{period_time}", &period_time.to_string());
 
             config_blocks.push(format!("\n{dmix}"));
         } else {
@@ -1069,6 +1232,14 @@ fn build_asound_conf(
         if config.is_real_hw {
             input_pcm = "\"capture\"".to_string();
 
+            let buffer_time = if config.buffer_time_ms > 0 {
+                config.buffer_time_ms * 1000
+            } else {
+                5000
+            };
+
+            let period_time = buffer_time / 5;
+
             let dsnoop = PLAYBACK_CAPTURE_TEMPLATE
                 .replace("{playback_capture}", "capture")
                 .replace("{dmix_dsnoop}", "dsnoop")
@@ -1077,7 +1248,9 @@ fn build_asound_conf(
                 .replace("{sub_device}", &config.sub_device_number.to_string())
                 .replace("{channels}", &config.channels.to_string())
                 .replace("{rate}", &config.rate.to_string())
-                .replace("{fmt}", &config.format.to_string());
+                .replace("{fmt}", &config.format.to_string())
+                .replace("{buffer_time}", &buffer_time.to_string())
+                .replace("{period_time}", &period_time.to_string());
 
             config_blocks.push(format!("\n{dsnoop}"));
         } else {
