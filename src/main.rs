@@ -22,6 +22,7 @@ use comfy_table::{
 
 use colored::*;
 use glob::glob;
+use itertools::Itertools;
 use which::which;
 
 const FORMATS: [AudioFormat; 5] = [
@@ -114,7 +115,7 @@ ctl.!default {
     card {card}
 }";
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum AudioFormat {
     U8,
     S16,
@@ -751,67 +752,89 @@ fn show_pcms(pcms: &[AlsaPcm]) {
     println!("\n{table}");
 }
 
-fn choose_a_configuration(pcm: &AlsaPcm) -> ValidConfiguration {
-    let mut configs = pcm.valid_configurations.clone();
-
+fn choose_a_configuration(mut configs: Vec<ValidConfiguration>) -> ValidConfiguration {
     if configs.len() == 1 {
         println!("{}", "\nThere is only one available configuration…".cyan());
     } else {
-        let formats = &pcm.formats;
+        let mut formats: Vec<AudioFormat> = configs
+            .iter()
+            .map(|config| config.format)
+            .unique()
+            .collect();
+
+        formats.sort();
+
         let formats_len = formats.len();
+
         let mut format_index = 0;
-
-        let rates = &pcm.rates;
-        let rates_len = rates.len();
-        let mut rate_index = 0;
-
-        let channels = &pcm.channels;
-        let channels_len = channels.len();
-        let mut channels_index = 0;
 
         if formats_len > 1 {
             println!("{}", "\nThe following Formats are available.".cyan());
 
-            show_list(formats);
+            show_list(&formats);
 
             format_index = pick_a_number("Please Choose a Format: ", formats_len);
         } else {
             println!("{}", "\nThere is only one available Format…".cyan());
 
-            show_list(formats);
+            show_list(&formats);
         }
+
+        let format = formats[format_index];
+
+        configs.retain(|config| config.format == format);
+
+        let mut rates: Vec<u32> = configs.iter().map(|config| config.rate).unique().collect();
+
+        rates.sort();
+
+        let rates_len = rates.len();
+
+        let mut rate_index = 0;
 
         if rates_len > 1 {
             println!("{}", "\nThe following Sampling Rates are available.".cyan());
 
-            show_list(rates);
+            show_list(&rates);
 
             rate_index = pick_a_number("Please Choose a Sampling Rate: ", rates_len);
         } else {
             println!("{}", "\nThere is only one available Sampling Rate…".cyan());
 
-            show_list(rates);
+            show_list(&rates);
         }
+
+        let rate = rates[rate_index];
+
+        configs.retain(|config| config.rate == rate);
+
+        let mut channels: Vec<u32> = configs
+            .iter()
+            .map(|config| config.channels)
+            .unique()
+            .collect();
+
+        channels.sort();
+
+        let channels_len = channels.len();
+
+        let mut channels_index = 0;
 
         if channels_len > 1 {
             println!("{}", "\nThe following Channel Counts are available.".cyan());
 
-            show_list(channels);
+            show_list(&channels);
 
             channels_index = pick_a_number("Please Choose a Channel Count: ", channels_len);
         } else {
             println!("{}", "\nThere is only one available Channel Count…".cyan());
 
-            show_list(channels);
+            show_list(&channels);
         }
 
-        let format = formats[format_index];
-        let rate = rates[rate_index];
         let channels = channels[channels_index];
 
-        configs.retain(|config| {
-            config.format == format && config.rate == rate && config.channels == channels
-        });
+        configs.retain(|config| config.channels == channels);
     }
 
     configs[0].clone()
@@ -1287,7 +1310,7 @@ fn main() {
             }
 
             let config = {
-                let config = choose_a_configuration(&playback_pcm);
+                let config = choose_a_configuration(playback_pcm.valid_configurations);
 
                 show_configuration(&config);
 
@@ -1341,7 +1364,7 @@ fn main() {
             }
 
             let config = {
-                let config = choose_a_configuration(&capture_pcm);
+                let config = choose_a_configuration(capture_pcm.valid_configurations);
 
                 show_configuration(&config);
 
