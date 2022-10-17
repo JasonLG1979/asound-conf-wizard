@@ -85,14 +85,14 @@ pcm.{playback_capture} {
             device {device}
             subdevice {sub_device}
         }
+        channels {channels}
+        rate {rate}
+        format {fmt}
         period_size 0
         buffer_size 0
         periods 0
         buffer_time {buffer_time}
         period_time {period_time}
-        channels {channels}
-        rate {rate}
-        format {fmt}
     }
 }";
 
@@ -381,7 +381,7 @@ impl ValidConfiguration {
             format,
             rate,
             channels,
-            buffer_time_ms: 0,
+            buffer_time_ms: 500,
         }
     }
 
@@ -1044,7 +1044,7 @@ fn show_configuration(config: &ValidConfiguration) {
         .add_row(vec![Cell::new(format!("RATE: {}", config.rate))])
         .add_row(vec![Cell::new(format!("CHANNELS: {}", config.channels))]);
 
-    if config.buffer_time_ms > 0 {
+    if config.is_real_hw {
         table.add_row(vec![Cell::new(format!(
             "BUFFER TIME MS: {}",
             config.buffer_time_ms
@@ -1178,30 +1178,27 @@ fn build_asound_conf(
     capture_config: Option<ValidConfiguration>,
     rate_converter: Option<&str>,
 ) -> String {
-    let mut config_blocks = Vec::with_capacity(8);
+    let mut config_blocks = Vec::with_capacity(9);
     let mut input_pcm = "\"null\"".to_string();
     let mut output_pcm = "\"null\"".to_string();
+    let mut defaults = String::new();
+    let mut converter = String::new();
+    let mut playback = String::new();
+    let mut capture = String::new();
     let mut control = String::new();
 
     if let Some(rate_converter) = rate_converter {
-        let converter = format!("defaults.pcm.rate_converter {rate_converter}");
-
-        config_blocks.push(converter);
+        converter = format!("defaults.pcm.rate_converter {rate_converter}");
     }
 
     if let Some(config) = playback_config {
         if config.is_real_hw {
             output_pcm = "\"playback\"".to_string();
 
-            let buffer_time = if config.buffer_time_ms > 0 {
-                config.buffer_time_ms * 1000
-            } else {
-                5000
-            };
-
+            let buffer_time = config.buffer_time_ms * 1000;
             let period_time = buffer_time / 5;
 
-            let dmix = PLAYBACK_CAPTURE_TEMPLATE
+            playback = PLAYBACK_CAPTURE_TEMPLATE
                 .replace("{playback_capture}", "playback")
                 .replace("{dmix_dsnoop}", "dmix")
                 .replace("{card}", &config.card_name)
@@ -1211,18 +1208,18 @@ fn build_asound_conf(
                 .replace("{rate}", &config.rate.to_string())
                 .replace("{fmt}", &config.format.to_string())
                 .replace("{buffer_time}", &buffer_time.to_string())
-                .replace("{period_time}", &period_time.to_string());
-
-            config_blocks.push(format!("\n{dmix}"));
+                .replace("{period_time}", &period_time.to_string())
+                .trim()
+                .to_string();
         } else {
             output_pcm = format!("\"{}\"", config.name);
 
-            let defaults = DIGITAL_OUPUT_TEMPLATE
+            defaults = DIGITAL_OUPUT_TEMPLATE
                 .replace("{channels}", &config.channels.to_string())
                 .replace("{rate}", &config.rate.to_string())
-                .replace("{fmt}", &config.format.to_string());
-
-            config_blocks.push(defaults);
+                .replace("{fmt}", &config.format.to_string())
+                .trim()
+                .to_string();
         }
 
         control = DEFAULT_CONTROL_TEMPLATE.replace("{card}", &config.card_name);
@@ -1232,15 +1229,10 @@ fn build_asound_conf(
         if config.is_real_hw {
             input_pcm = "\"capture\"".to_string();
 
-            let buffer_time = if config.buffer_time_ms > 0 {
-                config.buffer_time_ms * 1000
-            } else {
-                5000
-            };
-
+            let buffer_time = config.buffer_time_ms * 1000;
             let period_time = buffer_time / 5;
 
-            let dsnoop = PLAYBACK_CAPTURE_TEMPLATE
+            capture = PLAYBACK_CAPTURE_TEMPLATE
                 .replace("{playback_capture}", "capture")
                 .replace("{dmix_dsnoop}", "dsnoop")
                 .replace("{card}", &config.card_name)
@@ -1251,10 +1243,15 @@ fn build_asound_conf(
                 .replace("{fmt}", &config.format.to_string())
                 .replace("{buffer_time}", &buffer_time.to_string())
                 .replace("{period_time}", &period_time.to_string());
-
-            config_blocks.push(format!("\n{dsnoop}"));
         } else {
             input_pcm = format!("\"{}\"", config.name);
+
+            if defaults.is_empty() {
+                defaults = DIGITAL_OUPUT_TEMPLATE
+                    .replace("{channels}", &config.channels.to_string())
+                    .replace("{rate}", &config.rate.to_string())
+                    .replace("{fmt}", &config.format.to_string());
+            }
         }
 
         if control.is_empty() {
@@ -1262,13 +1259,35 @@ fn build_asound_conf(
         }
     }
 
-    let asym_default = ASYM_DEFAULT_TEMPLATE
+    if !defaults.is_empty() {
+        config_blocks.push(defaults);
+    }
+
+    if !converter.is_empty() {
+        config_blocks.push(converter);
+    }
+
+    if !config_blocks.is_empty() {
+        config_blocks.push(String::new());
+    }
+
+    if !playback.is_empty() {
+        config_blocks.push(format!("{playback}\n"));
+    }
+
+    if !capture.is_empty() {
+        config_blocks.push(format!("{capture}\n"));
+    }
+
+    let asym = ASYM_DEFAULT_TEMPLATE
         .replace("{input_pcm}", &input_pcm)
         .replace("{output_pcm}", &output_pcm);
 
-    config_blocks.push(format!("\n{asym_default}"));
+    config_blocks.push(asym);
 
-    config_blocks.push(format!("\n{control}"));
+    if !control.is_empty() {
+        config_blocks.push(format!("\n{control}"));
+    }
 
     config_blocks.join("\n")
 }
