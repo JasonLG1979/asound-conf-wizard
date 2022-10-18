@@ -46,7 +46,7 @@ const CONFLICTING_SOFTWARE: [[&str; 2]; 3] = [
 ];
 
 const CHANNELS: RangeInclusive<u32> = 1..=12;
-const BUFFER_TIMES: RangeInclusive<u32> = 5000..=500000;
+const BUFFER_TIMES: RangeInclusive<u32> = 1000..=500000;
 
 const ASOUND_FILE_PATH: &str = "/etc/asound.conf";
 const DUMMY_FILE_PATH_TEMPLATE: &str = "/etc/foobarbaz{now}";
@@ -381,14 +381,14 @@ impl ValidConfiguration {
             format,
             rate,
             channels,
-            buffer_time_ms: 500,
+            buffer_time_ms: 250,
         }
     }
 
     pub fn get_buffer_times_ms(&mut self) -> Vec<u32> {
-        let mut buffer_times_ms = Vec::with_capacity(100);
+        let mut buffer_times_ms = Vec::with_capacity(500);
 
-        for buffer_time in BUFFER_TIMES.step_by(5000) {
+        for buffer_time in BUFFER_TIMES.step_by(1000) {
             let period_time = buffer_time / 5;
 
             if self.test_buffer_times(buffer_time, period_time) {
@@ -786,6 +786,28 @@ fn pick_a_number(display_text: &str, vec_len: usize) -> usize {
     }
 }
 
+fn pick_from_choices(display_text: &str, choices: &[u32]) -> u32 {
+    let first_choice = choices[0];
+    let last_choice = choices[choices.len() - 1];
+    let display_text = &format!("{display_text} [{first_choice} - {last_choice}]: ");
+    loop {
+        if let Ok(responce) = user_input(display_text).parse::<u32>() {
+            if (first_choice..=last_choice).contains(&responce) {
+                if let Some(value) = choices.iter().min_by_key(|x| x.abs_diff(responce)) {
+                    return *value;
+                }
+            }
+        }
+
+        println!(
+            "{}",
+            format!("\nPlease Enter a Number [{first_choice} - {last_choice}]")
+                .bold()
+                .yellow()
+        );
+    }
+}
+
 fn choose_a_pcm(pcms: &[AlsaPcm], direction: Direction) -> AlsaPcm {
     let vec_len = pcms.len();
     let mut pcm_index = 0;
@@ -958,17 +980,12 @@ fn choose_a_configuration(mut configs: Vec<ValidConfiguration>) -> ValidConfigur
             Ordering::Greater => {
                 println!(
                     "{}",
-                    "\nThe following Buffer Times in milliseconds are available.".cyan()
+                    "\nYour choice will be snapped to the nearest available time.".cyan()
                 );
-
-                show_list(&buffer_times_ms);
-
-                let buffer_times_ms_index = pick_a_number(
-                    "Please Choose a Buffer Time in milliseconds: ",
-                    buffer_times_ms_len,
+                config.buffer_time_ms = pick_from_choices(
+                    "Please Choose a Buffer Time in milliseconds from",
+                    &buffer_times_ms,
                 );
-
-                config.buffer_time_ms = buffer_times_ms[buffer_times_ms_index];
             }
             Ordering::Equal => {
                 println!(
@@ -979,7 +996,12 @@ fn choose_a_configuration(mut configs: Vec<ValidConfiguration>) -> ValidConfigur
                 show_list(&buffer_times_ms);
                 config.buffer_time_ms = buffer_times_ms[0];
             }
-            _ => (),
+            Ordering::Less => {
+                println!(
+                    "{}",
+                    "\nNo available Buffer Times were reported, falling back to the default of 250 milliseconds…".cyan()
+                );
+            }
         }
     }
 
