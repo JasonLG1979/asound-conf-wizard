@@ -46,7 +46,11 @@ const CONFLICTING_SOFTWARE: [[&str; 2]; 3] = [
 ];
 
 const CHANNELS: RangeInclusive<u32> = 1..=12;
-const BUFFER_TIMES: RangeInclusive<u32> = 1000..=500000;
+
+// 1ms
+const MIN_BUFFER_TIME_US: u32 = 1000;
+// 1000ms
+const MAX_BUFFER_TIME_US: u32 = 1000000;
 
 const ASOUND_FILE_PATH: &str = "/etc/asound.conf";
 const DUMMY_FILE_PATH_TEMPLATE: &str = "/etc/foobarbaz{now}";
@@ -366,10 +370,14 @@ struct ValidConfiguration {
     pub rate: u32,
     pub channels: u32,
     pub buffer_time_ms: u32,
+    buffer_time_max: u32,
 }
 
 impl ValidConfiguration {
     pub fn new(pcm: AlsaPcm, format: AudioFormat, rate: u32, channels: u32) -> Self {
+        let buffer_time_max =
+            Self::get_buffer_time_max(&pcm.name, pcm.direction, format, rate, channels);
+
         Self {
             name: pcm.name,
             description: pcm.description,
@@ -382,13 +390,16 @@ impl ValidConfiguration {
             rate,
             channels,
             buffer_time_ms: 250,
+            buffer_time_max,
         }
     }
 
     pub fn get_buffer_times_ms(&mut self) -> Vec<u32> {
-        let mut buffer_times_ms = Vec::with_capacity(500);
+        let mut buffer_times_ms = Vec::with_capacity(1000);
 
-        for buffer_time in BUFFER_TIMES.step_by(1000) {
+        for buffer_time in
+            (MIN_BUFFER_TIME_US..=self.buffer_time_max).step_by(MIN_BUFFER_TIME_US as usize)
+        {
             let period_time = buffer_time / 5;
 
             if self.test_buffer_times(buffer_time, period_time) {
@@ -399,13 +410,77 @@ impl ValidConfiguration {
         buffer_times_ms
     }
 
+    fn get_buffer_time_max(
+        name: &str,
+        direction: Direction,
+        format: AudioFormat,
+        rate: u32,
+        channels: u32,
+    ) -> u32 {
+        if let Ok(pcm) = PCM::new(name, direction, false) {
+            if let Ok(hwp) = HwParams::any(&pcm) {
+                match hwp.set_rate_resample(false) {
+                    Err(_) => return 0,
+                    Ok(_) => match hwp.get_rate_resample() {
+                        Err(_) => return 0,
+                        Ok(actual_rate_resample) => {
+                            if actual_rate_resample {
+                                return 0;
+                            }
+                        }
+                    },
+                }
+
+                let format = Format::from(format);
+
+                match hwp.set_format(format) {
+                    Err(_) => return 0,
+                    Ok(_) => match hwp.get_format() {
+                        Err(_) => return 0,
+                        Ok(actual_format) => {
+                            if actual_format != format {
+                                return 0;
+                            }
+                        }
+                    },
+                }
+
+                match hwp.set_rate(rate, ValueOr::Nearest) {
+                    Err(_) => return 0,
+                    Ok(_) => match hwp.get_rate() {
+                        Err(_) => return 0,
+                        Ok(actual_rate) => {
+                            if actual_rate != rate {
+                                return 0;
+                            }
+                        }
+                    },
+                }
+
+                match hwp.set_channels(channels) {
+                    Err(_) => return 0,
+                    Ok(_) => match hwp.get_channels() {
+                        Err(_) => return 0,
+                        Ok(actual_channels) => {
+                            if actual_channels != channels {
+                                return 0;
+                            }
+                        }
+                    },
+                }
+
+                return ((hwp.get_buffer_time_max().unwrap_or(1) / 1000) * 1000)
+                    .min(MAX_BUFFER_TIME_US);
+            }
+        }
+        0
+    }
+
     fn test_buffer_times(&mut self, buffer_time: u32, period_time: u32) -> bool {
         // It's basically all or nothing with PCMs and HwParams.
         // Once they are in an error state they can't be reused.
         // So every time we test a combination of params we
         // have to create new ones from scratch.
-        let format = Format::from(self.format);
-
         if let Ok(pcm) = PCM::new(&self.name, self.direction, false) {
             if let Ok(hwp) = HwParams::any(&pcm) {
                 match hwp.set_rate_resample(false) {
@@ -419,6 +494,8 @@ impl ValidConfiguration {
                         }
                     },
                 }
+
+                let format = Format::from(self.format);
 
                 match hwp.set_format(format) {
                     Err(_) => return false,
@@ -488,7 +565,6 @@ struct AlsaPcm {
     pub description: String,
     pub direction: Direction,
     pub is_real_hw: bool,
-    pub software_mixable: bool,
     pub has_mixer: bool,
     pub card_name: String,
     pub device_number: u32,
@@ -517,9 +593,7 @@ impl AlsaPcm {
             .parse::<u32>()
             .unwrap_or_default();
 
-        let software_mixable = name.starts_with("hw:");
-
-        let mut is_real_hw = name.starts_with("hw:");
+        let mut is_real_hw = true;
 
         let has_mixer = Self::has_mixer(name, direction);
 
@@ -537,6 +611,7 @@ impl AlsaPcm {
                 if device_number != vdevice_number {
                     is_real_hw = false;
                 }
+
                 if let Ok(hwp) = HwParams::any(&pcm) {
                     if hwp.set_rate_resample(false).is_ok() {
                         for f in FORMATS {
@@ -604,7 +679,6 @@ impl AlsaPcm {
             description,
             direction,
             is_real_hw,
-            software_mixable,
             has_mixer,
             card_name: card_name.to_string(),
             device_number,
@@ -867,7 +941,8 @@ fn show_pcms(pcms: &[AlsaPcm]) {
             .add_row(vec![
                 Cell::new(format!("{direction}: {}", i + 1)).add_attribute(Attribute::Bold)
             ])
-            .add_row(vec![Cell::new(format!("PCM: {}", pcm.name))])
+            .add_row(vec![Cell::new(format!("CARD: {}", pcm.card_name))])
+            .add_row(vec![Cell::new(format!("DEV: {}", pcm.device_number))])
             .add_row(vec![Cell::new(format!("DESCRIPTION: {}", pcm.description))])
             .add_row(vec![Cell::new(
                 format!("FORMATS: {:?}", formats).replace('"', ""),
@@ -999,7 +1074,12 @@ fn choose_a_configuration(mut configs: Vec<ValidConfiguration>) -> ValidConfigur
             Ordering::Less => {
                 println!(
                     "{}",
-                    "\nNo available Buffer Times were reported, falling back to the default of 250 milliseconds…".cyan()
+                    "\nNo available Buffer Times were reported, falling back to the default of 250 milliseconds.".bold().yellow()
+                );
+
+                println!(
+                    "{}",
+                    format!("\nIf you experience issues you may need to manually edit {ASOUND_FILE_PATH} to correct them.").bold().yellow()
                 );
             }
         }
@@ -1057,7 +1137,8 @@ fn show_configuration(config: &ValidConfiguration) {
         .add_row(vec![
             Cell::new(direction.to_uppercase()).add_attribute(Attribute::Bold)
         ])
-        .add_row(vec![Cell::new(format!("PCM: {}", config.name))])
+        .add_row(vec![Cell::new(format!("CARD: {}", config.card_name))])
+        .add_row(vec![Cell::new(format!("DEV: {}", config.device_number))])
         .add_row(vec![Cell::new(format!(
             "DESCRIPTION: {}",
             config.description
@@ -1107,19 +1188,16 @@ fn get_pcms() -> (Vec<AlsaPcm>, Vec<AlsaPcm>) {
     if let Ok(hints) = HintIter::new_str(None, "pcm") {
         for hint in hints {
             if let Some(name) = hint.name {
-                let name = name.trim().to_string();
-                if name.starts_with("hw:")
-                    || name.starts_with("hdmi:")
-                    || name.starts_with("iec958:")
-                {
-                    let description = hint
-                        .desc
-                        .unwrap_or_else(|| "NONE".to_string())
-                        .replace('\n', " ")
-                        .trim()
-                        .to_string();
-
+                if name.starts_with("hw:") {
                     if let Some(direction) = hint.direction {
+                        let name = name.trim().to_string();
+                        let description = hint
+                            .desc
+                            .unwrap_or_else(|| "NONE".to_string())
+                            .replace('\n', " ")
+                            .trim()
+                            .to_string();
+
                         thread_manager.add_job(&name, &description, direction);
                     }
                 }
@@ -1230,18 +1308,14 @@ fn build_asound_conf(
                 .replace("{rate}", &config.rate.to_string())
                 .replace("{fmt}", &config.format.to_string())
                 .replace("{buffer_time}", &buffer_time.to_string())
-                .replace("{period_time}", &period_time.to_string())
-                .trim()
-                .to_string();
+                .replace("{period_time}", &period_time.to_string());
         } else {
             output_pcm = format!("\"{}\"", config.name);
 
             defaults = DIGITAL_OUPUT_TEMPLATE
                 .replace("{channels}", &config.channels.to_string())
                 .replace("{rate}", &config.rate.to_string())
-                .replace("{fmt}", &config.format.to_string())
-                .trim()
-                .to_string();
+                .replace("{fmt}", &config.format.to_string());
         }
 
         control = DEFAULT_CONTROL_TEMPLATE.replace("{card}", &config.card_name);
@@ -1500,10 +1574,10 @@ fn main() {
 
             let pcm_name = &playback_pcm.name;
 
-            if !playback_pcm.software_mixable && !playback_pcm.has_mixer {
+            if !playback_pcm.is_real_hw && !playback_pcm.has_mixer {
                 println!(
                     "{}",
-                    format!("\n{pcm_name}. Does NOT support Software Mixing,")
+                    format!("\n{pcm_name} may NOT support Software Mixing,")
                         .bold()
                         .yellow()
                 );
@@ -1554,10 +1628,10 @@ fn main() {
 
             let pcm_name = &capture_pcm.name;
 
-            if !capture_pcm.software_mixable && !capture_pcm.has_mixer {
+            if !capture_pcm.is_real_hw && !capture_pcm.has_mixer {
                 println!(
                     "{}",
-                    format!("\n{pcm_name}. Does NOT support Software Mixing,")
+                    format!("\n{pcm_name} may NOT support Software Mixing,")
                         .bold()
                         .yellow()
                 );
