@@ -39,18 +39,20 @@ const RATES: [u32; 14] = [
     768000,
 ];
 
+const CHANNELS: RangeInclusive<u32> = 1..=12;
+
+const US_PER_MS: u32 = 1000;
+const PERIODS_PER_BUFFER: u32 = 5;
+const MIN_BUFFER_TIME_US: u32 = 1000;
+const MAX_BUFFER_TIME_US: u32 = 1000000;
+const MIN_DEFAULT_BUFFER_TIME_MS: u32 = 50;
+const MAX_DEFAULT_BUFFER_TIME_MS: u32 = 500;
+
 const CONFLICTING_SOFTWARE: [[&str; 2]; 3] = [
     ["pulseaudio", "PulseAudio"],
     ["pipewire", "PipeWire"],
     ["jackd", "JACK Audio"],
 ];
-
-const CHANNELS: RangeInclusive<u32> = 1..=12;
-
-// 1ms
-const MIN_BUFFER_TIME_US: u32 = 1000;
-// 1000ms
-const MAX_BUFFER_TIME_US: u32 = 1000000;
 
 const ASOUND_FILE_PATH: &str = "/etc/asound.conf";
 const DUMMY_FILE_PATH_TEMPLATE: &str = "/etc/foobarbaz{now}";
@@ -135,7 +137,7 @@ enum AudioFormat {
     S32,
 }
 
-// We only care about the formats Dmix understands.
+// We only care about the formats dmix and dsnoop understand.
 impl From<AudioFormat> for Format {
     fn from(f: AudioFormat) -> Format {
         use AudioFormat::*;
@@ -389,7 +391,9 @@ impl ValidConfiguration {
             format,
             rate,
             channels,
-            buffer_time_ms: 250,
+            buffer_time_ms: (buffer_time_max / US_PER_MS)
+                .min(MAX_DEFAULT_BUFFER_TIME_MS)
+                .max(MIN_DEFAULT_BUFFER_TIME_MS),
             buffer_time_max,
         }
     }
@@ -397,13 +401,11 @@ impl ValidConfiguration {
     pub fn get_buffer_times_ms(&mut self) -> Vec<u32> {
         let mut buffer_times_ms = Vec::with_capacity(1000);
 
-        for buffer_time in
-            (MIN_BUFFER_TIME_US..=self.buffer_time_max).step_by(MIN_BUFFER_TIME_US as usize)
-        {
-            let period_time = buffer_time / 5;
+        for buffer_time in (MIN_BUFFER_TIME_US..=self.buffer_time_max).step_by(US_PER_MS as usize) {
+            let period_time = buffer_time / PERIODS_PER_BUFFER;
 
             if self.test_buffer_times(buffer_time, period_time) {
-                buffer_times_ms.push(buffer_time / 1000);
+                buffer_times_ms.push(buffer_time / US_PER_MS);
             }
         }
 
@@ -469,8 +471,12 @@ impl ValidConfiguration {
                     },
                 }
 
-                return ((hwp.get_buffer_time_max().unwrap_or(1) / 1000) * 1000)
-                    .min(MAX_BUFFER_TIME_US);
+                return match hwp.get_buffer_time_max() {
+                    Err(_) => 0,
+                    Ok(buffer_time_max) => {
+                        ((buffer_time_max / US_PER_MS) * US_PER_MS).min(MAX_BUFFER_TIME_US)
+                    }
+                };
             }
         }
         0
@@ -620,8 +626,12 @@ impl AlsaPcm {
                             }
                         }
 
-                        let min_rate = hwp.get_rate_min().unwrap_or(8000).max(8000);
-                        let max_rate = hwp.get_rate_max().unwrap_or(768000).min(768000);
+                        let min_rate = hwp.get_rate_min().unwrap_or(RATES[0]).max(RATES[0]);
+
+                        let max_rate = hwp
+                            .get_rate_max()
+                            .unwrap_or(RATES[RATES.len() - 1])
+                            .min(RATES[RATES.len() - 1]);
 
                         for r in min_rate..=max_rate {
                             if hwp.test_rate(r).is_ok() {
@@ -648,7 +658,7 @@ impl AlsaPcm {
                         }
 
                         let min_channels = hwp.get_channels_min().unwrap_or(1).max(1);
-                        let max_channels = hwp.get_channels_max().unwrap_or(255).min(255);
+                        let max_channels = hwp.get_channels_max().unwrap_or(u32::MAX).max(1);
 
                         for c in min_channels..=max_channels {
                             if hwp.test_channels(c).is_ok() {
@@ -843,12 +853,10 @@ fn user_input<T: std::fmt::Display>(display_text: T) -> String {
 
 fn pick_a_number(display_text: &str, vec_len: usize) -> usize {
     loop {
-        let responce = user_input(display_text)
-            .parse::<usize>()
-            .unwrap_or_default();
-
-        if responce != 0 && responce <= vec_len {
-            return responce - 1;
+        if let Ok(responce) = user_input(display_text).parse::<usize>() {
+            if (1..=vec_len).contains(&responce) {
+                return responce - 1;
+            }
         }
 
         println!(
@@ -1074,7 +1082,7 @@ fn choose_a_configuration(mut configs: Vec<ValidConfiguration>) -> ValidConfigur
             Ordering::Less => {
                 println!(
                     "{}",
-                    "\nNo available Buffer Times were reported, falling back to the default of 250 milliseconds.".bold().yellow()
+                    format!("\nNo available Buffer Times were reported, falling back to {} milliseconds.", config.buffer_time_ms).bold().yellow()
                 );
 
                 println!(
@@ -1295,8 +1303,8 @@ fn build_asound_conf(
         if config.is_real_hw {
             output_pcm = "\"playback\"".to_string();
 
-            let buffer_time = config.buffer_time_ms * 1000;
-            let period_time = buffer_time / 5;
+            let buffer_time = config.buffer_time_ms * US_PER_MS;
+            let period_time = buffer_time / PERIODS_PER_BUFFER;
 
             playback = PLAYBACK_CAPTURE_TEMPLATE
                 .replace("{playback_capture}", "playback")
@@ -1325,8 +1333,8 @@ fn build_asound_conf(
         if config.is_real_hw {
             input_pcm = "\"capture\"".to_string();
 
-            let buffer_time = config.buffer_time_ms * 1000;
-            let period_time = buffer_time / 5;
+            let buffer_time = config.buffer_time_ms * US_PER_MS;
+            let period_time = buffer_time / PERIODS_PER_BUFFER;
 
             capture = PLAYBACK_CAPTURE_TEMPLATE
                 .replace("{playback_capture}", "capture")
