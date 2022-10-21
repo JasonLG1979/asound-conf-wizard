@@ -41,6 +41,8 @@ const RATES: [u32; 14] = [
 
 const CHANNELS: RangeInclusive<u32> = 1..=12;
 
+const MIN_RATE: u32 = 8000;
+const MAX_RATE: u32 = 768000;
 const US_PER_MS: u32 = 1000;
 const PERIODS_PER_BUFFER: u32 = 5;
 const MIN_BUFFER_TIME_US: u32 = 1000;
@@ -52,6 +54,14 @@ const CONFLICTING_SOFTWARE: [[&str; 2]; 3] = [
     ["pulseaudio", "PulseAudio"],
     ["pipewire", "PipeWire"],
     ["jackd", "JACK Audio"],
+];
+
+const DISALLOWED_DEVICES: [&str; 2] = [
+    // HDMI ports on Raspberry Pi's are not software mixable.
+    // Even though they *claim* to be hw,
+    // they are really iec958 behind plug plugins.
+    "hw:CARD=vc4hdmi,DEV=0",
+    "hw:CARD=b1,DEV=0",
 ];
 
 const ASOUND_FILE_PATH: &str = "/etc/asound.conf";
@@ -104,7 +114,7 @@ pcm.{playback_capture} {
 
 // See:
 // https://github.com/alsa-project/alsa-lib/blob/master/src/pcm/pcm_asym.c#L20
-const ASYM_DEFAULT_TEMPLATE: &str = "\
+const ASYM_TEMPLATE: &str = "\
 pcm.!default {
     type asym
     capture.pcm {
@@ -117,12 +127,7 @@ pcm.!default {
     }
 }";
 
-const DIGITAL_OUPUT_TEMPLATE: &str = "\
-defaults.pcm.dmix.rate {rate}
-defaults.pcm.dmix.format {fmt}
-defaults.pcm.dmix.channels {channels}";
-
-const DEFAULT_CONTROL_TEMPLATE: &str = "\
+const CONTROL_TEMPLATE: &str = "\
 ctl.!default {
     type hw
     card {card}
@@ -364,7 +369,6 @@ struct ValidConfiguration {
     pub name: String,
     pub description: String,
     pub direction: Direction,
-    pub is_real_hw: bool,
     pub card_name: String,
     pub device_number: u32,
     pub sub_device_number: u32,
@@ -384,7 +388,6 @@ impl ValidConfiguration {
             name: pcm.name,
             description: pcm.description,
             direction: pcm.direction,
-            is_real_hw: pcm.is_real_hw,
             card_name: pcm.card_name,
             device_number: pcm.device_number,
             sub_device_number: pcm.sub_device_number,
@@ -570,8 +573,6 @@ struct AlsaPcm {
     pub name: String,
     pub description: String,
     pub direction: Direction,
-    pub is_real_hw: bool,
-    pub has_mixer: bool,
     pub card_name: String,
     pub device_number: u32,
     pub sub_device_number: u32,
@@ -588,20 +589,14 @@ impl AlsaPcm {
         description: &str,
         direction: Direction,
     ) -> Option<Self> {
+        if !Self::software_mixable(name, direction) {
+            return None;
+        }
+
         let description = description[description.find(',').unwrap_or(0)..]
             .replace(',', "")
             .trim()
             .to_string();
-
-        let vdevice_number = name[name.find("DEV=").unwrap_or(0)..]
-            .replace("DEV=", "")
-            .trim()
-            .parse::<u32>()
-            .unwrap_or_default();
-
-        let mut is_real_hw = true;
-
-        let has_mixer = Self::has_mixer(name, direction);
 
         let mut device_number: u32 = 0;
         let mut sub_device_number: u32 = 0;
@@ -614,10 +609,6 @@ impl AlsaPcm {
                 device_number = info.get_device();
                 sub_device_number = info.get_subdevice();
 
-                if device_number != vdevice_number {
-                    is_real_hw = false;
-                }
-
                 if let Ok(hwp) = HwParams::any(&pcm) {
                     if hwp.set_rate_resample(false).is_ok() {
                         for f in FORMATS {
@@ -626,25 +617,15 @@ impl AlsaPcm {
                             }
                         }
 
-                        let min_rate = hwp.get_rate_min().unwrap_or(RATES[0]).max(RATES[0]);
+                        let min_rate = hwp.get_rate_min().unwrap_or(MIN_RATE).max(MIN_RATE);
 
-                        let max_rate = hwp
-                            .get_rate_max()
-                            .unwrap_or(RATES[RATES.len() - 1])
-                            .min(RATES[RATES.len() - 1]);
+                        let max_rate = hwp.get_rate_max().unwrap_or(MAX_RATE).min(MAX_RATE);
 
                         for r in min_rate..=max_rate {
                             if hwp.test_rate(r).is_ok() {
                                 if rates.len() != rates.capacity() {
                                     rates.push(r);
                                 } else {
-                                    // Device with conversion. Retest with limited range.
-                                    //
-                                    // Devices with rate conversion will say they support
-                                    // every single sampling rate in min_rate..=max_rate.
-                                    // We don't want a list of 764000 different available
-                                    // sampling rates.
-                                    is_real_hw = false;
                                     rates.clear();
 
                                     for r in RATES {
@@ -665,9 +646,6 @@ impl AlsaPcm {
                                 if channels.len() != channels.capacity() {
                                     channels.push(c);
                                 } else {
-                                    // Device with conversion. Retest with limited range. Same as above.
-                                    // We don't need a huge list of available channel counts.
-                                    is_real_hw = false;
                                     channels.clear();
 
                                     for c in CHANNELS {
@@ -688,8 +666,6 @@ impl AlsaPcm {
             name: name.to_string(),
             description,
             direction,
-            is_real_hw,
-            has_mixer,
             card_name: card_name.to_string(),
             device_number,
             sub_device_number,
@@ -702,6 +678,13 @@ impl AlsaPcm {
         let valid_configs = Self::get_valid_configurations(&pcm);
 
         if valid_configs.is_empty() {
+            println!(
+                "{}",
+                format!("\n{name} has no valid configurations, and will be ignored.")
+                    .bold()
+                    .yellow()
+            );
+
             None
         } else {
             // Filter out Formats, rates and channels that never
@@ -724,9 +707,28 @@ impl AlsaPcm {
         }
     }
 
-    fn has_mixer(name: &str, direction: Direction) -> bool {
-        // Try to open two instances of the PCM concurrently to see if it has a builtin mixer.
-        PCM::new(name, direction, false).is_ok() && PCM::new(name, direction, false).is_ok()
+    fn software_mixable(name: &str, direction: Direction) -> bool {
+        let software_mixable = if DISALLOWED_DEVICES.contains(&name) {
+            false
+        } else {
+            let d_name = match direction {
+                Direction::Playback => name.replace("hw:", "dmix:"),
+                Direction::Capture => name.replace("hw:", "dsnoop:"),
+            };
+
+            PCM::new(&d_name, direction, false).is_ok()
+        };
+
+        if !software_mixable {
+            println!(
+                "{}",
+                format!("\n{name} is not software mixable, and will be ignored.")
+                    .bold()
+                    .yellow()
+            );
+        }
+
+        software_mixable
     }
 
     fn test_params(
@@ -1049,47 +1051,50 @@ fn choose_a_configuration(mut configs: Vec<ValidConfiguration>) -> ValidConfigur
 
     let mut config = configs[0].clone();
 
-    if config.is_real_hw {
-        println!(
-            "{}",
-            "\nRetrieving Buffer parameters. This may take a moment…".cyan()
-        );
+    println!(
+        "{}",
+        "\nRetrieving Buffer parameters. This may take a moment…".cyan()
+    );
 
-        let buffer_times_ms = config.get_buffer_times_ms();
+    let buffer_times_ms = config.get_buffer_times_ms();
 
-        let buffer_times_ms_len = buffer_times_ms.len();
+    let buffer_times_ms_len = buffer_times_ms.len();
 
-        match buffer_times_ms_len.cmp(&1) {
-            Ordering::Greater => {
-                println!(
-                    "{}",
-                    "\nYour choice will be snapped to the nearest available time.".cyan()
-                );
-                config.buffer_time_ms = pick_from_choices(
-                    "Please Choose a Buffer Time in milliseconds from",
-                    &buffer_times_ms,
-                );
-            }
-            Ordering::Equal => {
-                println!(
-                    "{}",
-                    "\nThere is only one available Buffer Time in milliseconds…".cyan()
-                );
+    match buffer_times_ms_len.cmp(&1) {
+        Ordering::Greater => {
+            println!(
+                "{}",
+                "\nYour choice will be snapped to the nearest available time.".cyan()
+            );
+            config.buffer_time_ms = pick_from_choices(
+                "Please Choose a Buffer Time in milliseconds from",
+                &buffer_times_ms,
+            );
+        }
+        Ordering::Equal => {
+            println!(
+                "{}",
+                "\nThere is only one available Buffer Time in milliseconds…".cyan()
+            );
 
-                show_list(&buffer_times_ms);
-                config.buffer_time_ms = buffer_times_ms[0];
-            }
-            Ordering::Less => {
-                println!(
-                    "{}",
-                    format!("\nNo available Buffer Times were reported, falling back to {} milliseconds.", config.buffer_time_ms).bold().yellow()
-                );
+            show_list(&buffer_times_ms);
+            config.buffer_time_ms = buffer_times_ms[0];
+        }
+        Ordering::Less => {
+            println!(
+                "{}",
+                format!(
+                    "\nNo available Buffer Times were reported, falling back to {} milliseconds.",
+                    config.buffer_time_ms
+                )
+                .bold()
+                .yellow()
+            );
 
-                println!(
+            println!(
                     "{}",
                     format!("\nIf you experience issues you may need to manually edit {ASOUND_FILE_PATH} to correct them.").bold().yellow()
                 );
-            }
         }
     }
 
@@ -1155,12 +1160,10 @@ fn show_configuration(config: &ValidConfiguration) {
         .add_row(vec![Cell::new(format!("RATE: {}", config.rate))])
         .add_row(vec![Cell::new(format!("CHANNELS: {}", config.channels))]);
 
-    if config.is_real_hw {
-        table.add_row(vec![Cell::new(format!(
-            "BUFFER TIME MS: {}",
-            config.buffer_time_ms
-        ))]);
-    }
+    table.add_row(vec![Cell::new(format!(
+        "BUFFER TIME MS: {}",
+        config.buffer_time_ms
+    ))]);
 
     println!("\n{table}");
 }
@@ -1286,10 +1289,9 @@ fn build_asound_conf(
     capture_config: Option<ValidConfiguration>,
     rate_converter: Option<&str>,
 ) -> String {
-    let mut config_blocks = Vec::with_capacity(9);
+    let mut config_blocks = Vec::with_capacity(5);
     let mut input_pcm = "\"null\"".to_string();
     let mut output_pcm = "\"null\"".to_string();
-    let mut defaults = String::new();
     let mut converter = String::new();
     let mut playback = String::new();
     let mut capture = String::new();
@@ -1300,79 +1302,51 @@ fn build_asound_conf(
     }
 
     if let Some(config) = playback_config {
-        if config.is_real_hw {
-            output_pcm = "\"playback\"".to_string();
+        output_pcm = "\"playback\"".to_string();
 
-            let buffer_time = config.buffer_time_ms * US_PER_MS;
-            let period_time = buffer_time / PERIODS_PER_BUFFER;
+        let buffer_time = config.buffer_time_ms * US_PER_MS;
+        let period_time = buffer_time / PERIODS_PER_BUFFER;
 
-            playback = PLAYBACK_CAPTURE_TEMPLATE
-                .replace("{playback_capture}", "playback")
-                .replace("{dmix_dsnoop}", "dmix")
-                .replace("{card}", &config.card_name)
-                .replace("{device}", &config.device_number.to_string())
-                .replace("{sub_device}", &config.sub_device_number.to_string())
-                .replace("{channels}", &config.channels.to_string())
-                .replace("{rate}", &config.rate.to_string())
-                .replace("{fmt}", &config.format.to_string())
-                .replace("{buffer_time}", &buffer_time.to_string())
-                .replace("{period_time}", &period_time.to_string());
-        } else {
-            output_pcm = format!("\"{}\"", config.name);
+        playback = PLAYBACK_CAPTURE_TEMPLATE
+            .replace("{playback_capture}", "playback")
+            .replace("{dmix_dsnoop}", "dmix")
+            .replace("{card}", &config.card_name)
+            .replace("{device}", &config.device_number.to_string())
+            .replace("{sub_device}", &config.sub_device_number.to_string())
+            .replace("{channels}", &config.channels.to_string())
+            .replace("{rate}", &config.rate.to_string())
+            .replace("{fmt}", &config.format.to_string())
+            .replace("{buffer_time}", &buffer_time.to_string())
+            .replace("{period_time}", &period_time.to_string());
 
-            defaults = DIGITAL_OUPUT_TEMPLATE
-                .replace("{channels}", &config.channels.to_string())
-                .replace("{rate}", &config.rate.to_string())
-                .replace("{fmt}", &config.format.to_string());
-        }
-
-        control = DEFAULT_CONTROL_TEMPLATE.replace("{card}", &config.card_name);
+        control = CONTROL_TEMPLATE.replace("{card}", &config.card_name);
     }
 
     if let Some(config) = capture_config {
-        if config.is_real_hw {
-            input_pcm = "\"capture\"".to_string();
+        input_pcm = "\"capture\"".to_string();
 
-            let buffer_time = config.buffer_time_ms * US_PER_MS;
-            let period_time = buffer_time / PERIODS_PER_BUFFER;
+        let buffer_time = config.buffer_time_ms * US_PER_MS;
+        let period_time = buffer_time / PERIODS_PER_BUFFER;
 
-            capture = PLAYBACK_CAPTURE_TEMPLATE
-                .replace("{playback_capture}", "capture")
-                .replace("{dmix_dsnoop}", "dsnoop")
-                .replace("{card}", &config.card_name)
-                .replace("{device}", &config.device_number.to_string())
-                .replace("{sub_device}", &config.sub_device_number.to_string())
-                .replace("{channels}", &config.channels.to_string())
-                .replace("{rate}", &config.rate.to_string())
-                .replace("{fmt}", &config.format.to_string())
-                .replace("{buffer_time}", &buffer_time.to_string())
-                .replace("{period_time}", &period_time.to_string());
-        } else {
-            input_pcm = format!("\"{}\"", config.name);
-
-            if defaults.is_empty() {
-                defaults = DIGITAL_OUPUT_TEMPLATE
-                    .replace("{channels}", &config.channels.to_string())
-                    .replace("{rate}", &config.rate.to_string())
-                    .replace("{fmt}", &config.format.to_string());
-            }
-        }
+        capture = PLAYBACK_CAPTURE_TEMPLATE
+            .replace("{playback_capture}", "capture")
+            .replace("{dmix_dsnoop}", "dsnoop")
+            .replace("{card}", &config.card_name)
+            .replace("{device}", &config.device_number.to_string())
+            .replace("{sub_device}", &config.sub_device_number.to_string())
+            .replace("{channels}", &config.channels.to_string())
+            .replace("{rate}", &config.rate.to_string())
+            .replace("{fmt}", &config.format.to_string())
+            .replace("{buffer_time}", &buffer_time.to_string())
+            .replace("{period_time}", &period_time.to_string());
 
         if control.is_empty() {
-            control = DEFAULT_CONTROL_TEMPLATE.replace("{card}", &config.card_name);
+            control = CONTROL_TEMPLATE.replace("{card}", &config.card_name);
         }
-    }
-
-    if !defaults.is_empty() {
-        config_blocks.push(defaults);
     }
 
     if !converter.is_empty() {
-        config_blocks.push(converter);
-    }
-
-    if !config_blocks.is_empty() {
-        config_blocks.push(String::new());
+        config_blocks.push(format!("{converter}\n"));
     }
 
     if !playback.is_empty() {
@@ -1383,7 +1357,7 @@ fn build_asound_conf(
         config_blocks.push(format!("{capture}\n"));
     }
 
-    let asym = ASYM_DEFAULT_TEMPLATE
+    let asym = ASYM_TEMPLATE
         .replace("{input_pcm}", &input_pcm)
         .replace("{output_pcm}", &output_pcm);
 
@@ -1580,31 +1554,6 @@ fn main() {
         loop {
             let playback_pcm = choose_a_pcm(&playback_pcms, Direction::Playback);
 
-            let pcm_name = &playback_pcm.name;
-
-            if !playback_pcm.is_real_hw && !playback_pcm.has_mixer {
-                println!(
-                    "{}",
-                    format!("\n{pcm_name} may NOT support Software Mixing,")
-                        .bold()
-                        .yellow()
-                );
-
-                println!(
-                    "{}",
-                    "and does not appear to have a Hardware Mixer either, concurrent access may not be possible."
-                        .bold()
-                        .yellow()
-                );
-
-                let confirm = user_input("If this is acceptable Please Enter \"OK\" to Continue: ")
-                    .to_lowercase();
-
-                if confirm != "ok" {
-                    continue;
-                }
-            }
-
             let config = {
                 let config = choose_a_configuration(playback_pcm.valid_configurations.clone());
 
@@ -1633,31 +1582,6 @@ fn main() {
     } else {
         loop {
             let capture_pcm = choose_a_pcm(&capture_pcms, Direction::Capture);
-
-            let pcm_name = &capture_pcm.name;
-
-            if !capture_pcm.is_real_hw && !capture_pcm.has_mixer {
-                println!(
-                    "{}",
-                    format!("\n{pcm_name} may NOT support Software Mixing,")
-                        .bold()
-                        .yellow()
-                );
-
-                println!(
-                    "{}",
-                    "and does not appear to have a Hardware Mixer either. Concurrent access may not be possible."
-                        .bold()
-                        .yellow()
-                );
-
-                let confirm = user_input("If this is acceptable Please Enter \"OK\" to Continue: ")
-                    .to_lowercase();
-
-                if confirm != "ok" {
-                    continue;
-                }
-            }
 
             let config = {
                 let config = choose_a_configuration(capture_pcm.valid_configurations.clone());
