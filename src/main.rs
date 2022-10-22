@@ -3,7 +3,6 @@ use std::{
     fmt, fs,
     fs::File,
     io::{stdin, stdout, Write},
-    ops::RangeInclusive,
     process::exit,
     sync::mpsc,
     thread,
@@ -34,14 +33,7 @@ const FORMATS: [AudioFormat; 5] = [
     AudioFormat::S32,
 ];
 
-const RATES: [u32; 14] = [
-    8000, 11025, 16000, 22050, 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600,
-    768000,
-];
-
-const CHANNELS: RangeInclusive<u32> = 1..=12;
-
-const MIN_RATE: u32 = 8000;
+const MIN_RATE: u32 = 3000;
 const MAX_RATE: u32 = 768000;
 const US_PER_MS: u32 = 1000;
 const PERIODS_PER_BUFFER: u32 = 5;
@@ -54,14 +46,6 @@ const CONFLICTING_SOFTWARE: [[&str; 2]; 3] = [
     ["pulseaudio", "PulseAudio"],
     ["pipewire", "PipeWire"],
     ["jackd", "JACK Audio"],
-];
-
-const DISALLOWED_DEVICES: [&str; 2] = [
-    // HDMI ports on Raspberry Pi's are not software mixable.
-    // Even though they *claim* to be hw,
-    // they are really iec958 behind plug plugins.
-    "hw:CARD=vc4hdmi,DEV=0",
-    "hw:CARD=b1,DEV=0",
 ];
 
 const ASOUND_FILE_PATH: &str = "/etc/asound.conf";
@@ -589,10 +573,6 @@ impl AlsaPcm {
         description: &str,
         direction: Direction,
     ) -> Option<Self> {
-        if !Self::software_mixable(name, direction) {
-            return None;
-        }
-
         let description = description[description.find(',').unwrap_or(0)..]
             .replace(',', "")
             .trim()
@@ -617,6 +597,24 @@ impl AlsaPcm {
                             }
                         }
 
+                        if formats.is_empty() {
+                            println!(
+                                "{}",
+                                format!(
+                                    "\n{name} does not support any formats supported by dmix/dsnoop."
+                                ).bold().yellow()
+                            );
+
+                            println!(
+                                "{}",
+                                format!("\n{name} is not software mixable, and will be ignored.")
+                                    .bold()
+                                    .yellow()
+                            );
+
+                            return None;
+                        }
+
                         let min_rate = hwp.get_rate_min().unwrap_or(MIN_RATE).max(MIN_RATE);
 
                         let max_rate = hwp.get_rate_max().unwrap_or(MAX_RATE).min(MAX_RATE);
@@ -626,14 +624,30 @@ impl AlsaPcm {
                                 if rates.len() != rates.capacity() {
                                     rates.push(r);
                                 } else {
-                                    rates.clear();
+                                    println!(
+                                        "{}",
+                                        format!(
+                                            "\n{name} is reporting an unusually large number of supported sampling rates (100+)."
+                                        ).bold().yellow()
+                                    );
 
-                                    for r in RATES {
-                                        if hwp.test_rate(r).is_ok() {
-                                            rates.push(r)
-                                        }
-                                    }
-                                    break;
+                                    println!(
+                                        "{}",
+                                        format!(
+                                            "\n{name} is more than likely not a real hardware device, but is actually a hardware device behind a plug plugin."
+                                        ).bold().yellow()
+                                    );
+
+                                    println!(
+                                        "{}",
+                                        format!(
+                                            "\n{name} is not software mixable, and will be ignored."
+                                        )
+                                        .bold()
+                                        .yellow()
+                                    );
+
+                                    return None;
                                 }
                             }
                         }
@@ -646,14 +660,30 @@ impl AlsaPcm {
                                 if channels.len() != channels.capacity() {
                                     channels.push(c);
                                 } else {
-                                    channels.clear();
+                                    println!(
+                                        "{}",
+                                        format!(
+                                            "\n{name} is reporting an unusually large number of supported channel counts (100+)."
+                                        ).bold().yellow()
+                                    );
 
-                                    for c in CHANNELS {
-                                        if hwp.test_channels(c).is_ok() {
-                                            channels.push(c)
-                                        }
-                                    }
-                                    break;
+                                    println!(
+                                        "{}",
+                                        format!(
+                                            "\n{name} is more than likely not a real hardware device, but is actually a hardware device behind a plug plugin."
+                                        ).bold().yellow()
+                                    );
+
+                                    println!(
+                                        "{}",
+                                        format!(
+                                            "\n{name} is not software mixable, and will be ignored."
+                                        )
+                                        .bold()
+                                        .yellow()
+                                    );
+
+                                    return None;
                                 }
                             }
                         }
@@ -705,30 +735,6 @@ impl AlsaPcm {
 
             Some(pcm)
         }
-    }
-
-    fn software_mixable(name: &str, direction: Direction) -> bool {
-        let software_mixable = if DISALLOWED_DEVICES.contains(&name) {
-            false
-        } else {
-            let d_name = match direction {
-                Direction::Playback => name.replace("hw:", "dmix:"),
-                Direction::Capture => name.replace("hw:", "dsnoop:"),
-            };
-
-            PCM::new(&d_name, direction, false).is_ok()
-        };
-
-        if !software_mixable {
-            println!(
-                "{}",
-                format!("\n{name} is not software mixable, and will be ignored.")
-                    .bold()
-                    .yellow()
-            );
-        }
-
-        software_mixable
     }
 
     fn test_params(
@@ -1576,7 +1582,7 @@ fn main() {
     };
 
     let capture_config = if capture_pcms.is_empty() {
-        println!("{}", "\nThere are no available capture PCMs…".cyan());
+        println!("{}", "\nThere are no available Capture PCMs…".cyan());
 
         None
     } else {
