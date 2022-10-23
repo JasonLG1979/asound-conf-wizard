@@ -28,15 +28,16 @@ RUN mkdir /build
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
 ENV PATH "/root/.cargo/bin/:$PATH"
+ENV CARGO_INSTALL_ROOT "/root/.cargo"
 ENV CARGO_TARGET_DIR "/build"
 ENV CARGO_HOME "/build/cache"
-
-RUN cargo install cargo-deb
 
 RUN rustup target add aarch64-unknown-linux-gnu \
     && rustup target add armv7-unknown-linux-gnueabihf
 
 RUN mkdir /.cargo
+
+RUN cargo install cargo-deb
 
 RUN echo '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' > /.cargo/config \
     && echo '[target.armv7-unknown-linux-gnueabihf]\nlinker = "arm-linux-gnueabihf-gcc"' >> /.cargo/config
