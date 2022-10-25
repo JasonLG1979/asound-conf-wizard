@@ -1,8 +1,9 @@
 use std::{
     cmp::Ordering,
-    fmt, fs,
+    fs,
     fs::File,
     io::{stdin, stdout, Write},
+    ops::RangeInclusive,
     process::exit,
     sync::mpsc,
     thread,
@@ -25,12 +26,16 @@ use glob::glob;
 use itertools::Itertools;
 use which::which;
 
-const FORMATS: [AudioFormat; 5] = [
-    AudioFormat::U8,
-    AudioFormat::S16,
-    AudioFormat::S24_3,
-    AudioFormat::S24,
-    AudioFormat::S32,
+const FORMATS: [Format; 9] = [
+    Format::U8,
+    Format::S16LE,
+    Format::S16BE,
+    Format::S243LE,
+    Format::S243BE,
+    Format::S24LE,
+    Format::S24BE,
+    Format::S32LE,
+    Format::S32BE,
 ];
 
 const MIN_RATE: u32 = 3000;
@@ -39,8 +44,6 @@ const US_PER_MS: u32 = 1000;
 const PERIODS_PER_BUFFER: u32 = 5;
 const MIN_BUFFER_TIME_US: u32 = 1000;
 const MAX_BUFFER_TIME_US: u32 = 1000000;
-const MIN_DEFAULT_BUFFER_TIME_MS: u32 = 50;
-const MAX_DEFAULT_BUFFER_TIME_MS: u32 = 500;
 
 const CONFLICTING_SOFTWARE: [[&str; 2]; 3] = [
     ["pulseaudio", "PulseAudio"],
@@ -116,54 +119,6 @@ ctl.!default {
     type hw
     card {card}
 }";
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum AudioFormat {
-    U8,
-    S16,
-    S24_3,
-    S24,
-    S32,
-}
-
-// We only care about the formats dmix and dsnoop understand.
-impl From<AudioFormat> for Format {
-    fn from(f: AudioFormat) -> Format {
-        use AudioFormat::*;
-        match f {
-            U8 => Format::U8,
-            S16 => Format::s16(),
-            S24_3 => Format::s24_3(),
-            S24 => Format::s24(),
-            S32 => Format::s32(),
-        }
-    }
-}
-
-impl fmt::Display for AudioFormat {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use AudioFormat::*;
-        match *self {
-            U8 => write!(f, "U8"),
-            #[cfg(target_endian = "little")]
-            S16 => write!(f, "S16_LE"),
-            #[cfg(target_endian = "big")]
-            S16 => write!(f, "S16_BE"),
-            #[cfg(target_endian = "little")]
-            S24_3 => write!(f, "S24_3LE"),
-            #[cfg(target_endian = "big")]
-            S24_3 => write!(f, "S24_3BE"),
-            #[cfg(target_endian = "little")]
-            S24 => write!(f, "S24_LE"),
-            #[cfg(target_endian = "big")]
-            S24 => write!(f, "S24_BE"),
-            #[cfg(target_endian = "little")]
-            S32 => write!(f, "S32_LE"),
-            #[cfg(target_endian = "big")]
-            S32 => write!(f, "S32_BE"),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 enum WorkerJob {
@@ -356,17 +311,19 @@ struct ValidConfiguration {
     pub card_name: String,
     pub device_number: u32,
     pub sub_device_number: u32,
-    pub format: AudioFormat,
+    pub format: Format,
     pub rate: u32,
     pub channels: u32,
     pub buffer_time_ms: u32,
-    buffer_time_max: u32,
+    buffer_time_range: RangeInclusive<u32>,
 }
 
 impl ValidConfiguration {
-    pub fn new(pcm: AlsaPcm, format: AudioFormat, rate: u32, channels: u32) -> Self {
-        let buffer_time_max =
-            Self::get_buffer_time_max(&pcm.name, pcm.direction, format, rate, channels);
+    pub fn new(pcm: AlsaPcm, format: Format, rate: u32, channels: u32) -> Self {
+        let (buffer_time_min, buffer_time_max) =
+            Self::get_buffer_time_range(&pcm.name, pcm.direction, format, rate, channels);
+
+        let fallback_buffer_time_ms = (buffer_time_max.abs_diff(buffer_time_min) / US_PER_MS) / 2;
 
         Self {
             name: pcm.name,
@@ -378,17 +335,15 @@ impl ValidConfiguration {
             format,
             rate,
             channels,
-            buffer_time_ms: (buffer_time_max / US_PER_MS)
-                .min(MAX_DEFAULT_BUFFER_TIME_MS)
-                .max(MIN_DEFAULT_BUFFER_TIME_MS),
-            buffer_time_max,
+            buffer_time_ms: fallback_buffer_time_ms,
+            buffer_time_range: buffer_time_min..=buffer_time_max,
         }
     }
 
     pub fn get_buffer_times_ms(&mut self) -> Vec<u32> {
         let mut buffer_times_ms = Vec::with_capacity(1000);
 
-        for buffer_time in (MIN_BUFFER_TIME_US..=self.buffer_time_max).step_by(US_PER_MS as usize) {
+        for buffer_time in self.buffer_time_range.clone().step_by(US_PER_MS as usize) {
             let period_time = buffer_time / PERIODS_PER_BUFFER;
 
             if self.test_buffer_times(buffer_time, period_time) {
@@ -399,74 +354,81 @@ impl ValidConfiguration {
         buffer_times_ms
     }
 
-    fn get_buffer_time_max(
+    fn get_buffer_time_range(
         name: &str,
         direction: Direction,
-        format: AudioFormat,
+        format: Format,
         rate: u32,
         channels: u32,
-    ) -> u32 {
+    ) -> (u32, u32) {
         if let Ok(pcm) = PCM::new(name, direction, false) {
             if let Ok(hwp) = HwParams::any(&pcm) {
                 match hwp.set_rate_resample(false) {
-                    Err(_) => return 0,
+                    Err(_) => return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US),
                     Ok(_) => match hwp.get_rate_resample() {
-                        Err(_) => return 0,
+                        Err(_) => return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US),
                         Ok(actual_rate_resample) => {
                             if actual_rate_resample {
-                                return 0;
+                                return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US);
                             }
                         }
                     },
                 }
 
-                let format = Format::from(format);
-
                 match hwp.set_format(format) {
-                    Err(_) => return 0,
+                    Err(_) => return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US),
                     Ok(_) => match hwp.get_format() {
-                        Err(_) => return 0,
+                        Err(_) => return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US),
                         Ok(actual_format) => {
                             if actual_format != format {
-                                return 0;
+                                return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US);
                             }
                         }
                     },
                 }
 
                 match hwp.set_rate(rate, ValueOr::Nearest) {
-                    Err(_) => return 0,
+                    Err(_) => return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US),
                     Ok(_) => match hwp.get_rate() {
-                        Err(_) => return 0,
+                        Err(_) => return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US),
                         Ok(actual_rate) => {
                             if actual_rate != rate {
-                                return 0;
+                                return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US);
                             }
                         }
                     },
                 }
 
                 match hwp.set_channels(channels) {
-                    Err(_) => return 0,
+                    Err(_) => return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US),
                     Ok(_) => match hwp.get_channels() {
-                        Err(_) => return 0,
+                        Err(_) => return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US),
                         Ok(actual_channels) => {
                             if actual_channels != channels {
-                                return 0;
+                                return (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US);
                             }
                         }
                     },
                 }
 
-                return match hwp.get_buffer_time_max() {
-                    Err(_) => 0,
+                let buffer_time_min = match hwp.get_buffer_time_min() {
+                    Err(_) => MIN_BUFFER_TIME_US,
+                    Ok(buffer_time_min) => {
+                        ((buffer_time_min / US_PER_MS) * US_PER_MS).max(MIN_BUFFER_TIME_US)
+                    }
+                };
+
+                let buffer_time_max = match hwp.get_buffer_time_max() {
+                    Err(_) => MAX_BUFFER_TIME_US,
                     Ok(buffer_time_max) => {
                         ((buffer_time_max / US_PER_MS) * US_PER_MS).min(MAX_BUFFER_TIME_US)
                     }
                 };
+
+                return (buffer_time_min, buffer_time_max);
             }
         }
-        0
+        (MIN_BUFFER_TIME_US, MAX_BUFFER_TIME_US)
     }
 
     fn test_buffer_times(&mut self, buffer_time: u32, period_time: u32) -> bool {
@@ -488,14 +450,12 @@ impl ValidConfiguration {
                     },
                 }
 
-                let format = Format::from(self.format);
-
-                match hwp.set_format(format) {
+                match hwp.set_format(self.format) {
                     Err(_) => return false,
                     Ok(_) => match hwp.get_format() {
                         Err(_) => return false,
                         Ok(actual_format) => {
-                            if actual_format != format {
+                            if actual_format != self.format {
                                 return false;
                             }
                         }
@@ -560,7 +520,7 @@ struct AlsaPcm {
     pub card_name: String,
     pub device_number: u32,
     pub sub_device_number: u32,
-    pub formats: Vec<AudioFormat>,
+    pub formats: Vec<Format>,
     pub rates: Vec<u32>,
     pub channels: Vec<u32>,
     pub valid_configurations: Vec<ValidConfiguration>,
@@ -573,14 +533,9 @@ impl AlsaPcm {
         description: &str,
         direction: Direction,
     ) -> Option<Self> {
-        let description = description[description.find(',').unwrap_or(0)..]
-            .replace(',', "")
-            .trim()
-            .to_string();
-
         let mut device_number: u32 = 0;
         let mut sub_device_number: u32 = 0;
-        let mut formats = Vec::with_capacity(5);
+        let mut formats = Vec::with_capacity(9);
         let mut rates = Vec::with_capacity(100);
         let mut channels = Vec::with_capacity(100);
 
@@ -592,7 +547,7 @@ impl AlsaPcm {
                 if let Ok(hwp) = HwParams::any(&pcm) {
                     if hwp.set_rate_resample(false).is_ok() {
                         for f in FORMATS {
-                            if hwp.test_format(Format::from(f)).is_ok() {
+                            if hwp.test_format(f).is_ok() {
                                 formats.push(f)
                             }
                         }
@@ -694,7 +649,7 @@ impl AlsaPcm {
 
         let mut pcm = AlsaPcm {
             name: name.to_string(),
-            description,
+            description: description.to_string(),
             direction,
             card_name: card_name.to_string(),
             device_number,
@@ -820,15 +775,14 @@ impl AlsaPcm {
         let mut configs = Vec::with_capacity(possible_num_configs);
 
         for format in &pcm.formats {
-            let alsa_format = Format::from(*format);
-            if Self::test_params(&pcm.name, pcm.direction, alsa_format, None, None) {
+            if Self::test_params(&pcm.name, pcm.direction, *format, None, None) {
                 for rate in &pcm.rates {
-                    if Self::test_params(&pcm.name, pcm.direction, alsa_format, Some(*rate), None) {
+                    if Self::test_params(&pcm.name, pcm.direction, *format, Some(*rate), None) {
                         for channels in &pcm.channels {
                             if Self::test_params(
                                 &pcm.name,
                                 pcm.direction,
-                                alsa_format,
+                                *format,
                                 Some(*rate),
                                 Some(*channels),
                             ) {
@@ -974,7 +928,7 @@ fn choose_a_configuration(mut configs: Vec<ValidConfiguration>) -> ValidConfigur
     if configs.len() == 1 {
         println!("{}", "\nThere is only one available configuration…".cyan());
     } else {
-        let mut formats: Vec<AudioFormat> = configs
+        let mut formats: Vec<Format> = configs
             .iter()
             .map(|config| config.format)
             .unique()
@@ -1211,9 +1165,7 @@ fn get_pcms() -> (Vec<AlsaPcm>, Vec<AlsaPcm>) {
                         let description = hint
                             .desc
                             .unwrap_or_else(|| "NONE".to_string())
-                            .replace('\n', " ")
-                            .trim()
-                            .to_string();
+                            .replace("\n", " ");
 
                         thread_manager.add_job(&name, &description, direction);
                     }
