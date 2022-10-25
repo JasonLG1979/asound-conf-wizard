@@ -26,17 +26,7 @@ use glob::glob;
 use itertools::Itertools;
 use which::which;
 
-const FORMATS: [Format; 9] = [
-    Format::U8,
-    Format::S16LE,
-    Format::S16BE,
-    Format::S243LE,
-    Format::S243BE,
-    Format::S24LE,
-    Format::S24BE,
-    Format::S32LE,
-    Format::S32BE,
-];
+const FORMATS: [Format; 4] = [Format::s16(), Format::s24_3(), Format::s24(), Format::s32()];
 
 const MIN_RATE: u32 = 3000;
 const MAX_RATE: u32 = 768000;
@@ -125,7 +115,6 @@ enum WorkerJob {
     GetPcm {
         name: String,
         card_name: String,
-        description: String,
         direction: Direction,
     },
     Done,
@@ -146,7 +135,7 @@ impl ThreadManager {
         }
     }
 
-    pub fn add_job(&mut self, name: &str, description: &str, direction: Direction) {
+    pub fn add_job(&mut self, name: &str, direction: Direction) {
         let card_name = name[name.find('=').unwrap_or(0)..name.find(',').unwrap_or(name.len())]
             .replace('=', "")
             .trim()
@@ -157,7 +146,7 @@ impl ThreadManager {
 
         for worker in self.workers.iter_mut() {
             if worker.card_name == card_name {
-                job_sent = worker.add_job(name, &card_name, description, direction);
+                job_sent = worker.add_job(name, &card_name, direction);
                 bad_worker = !job_sent;
             }
         }
@@ -170,7 +159,7 @@ impl ThreadManager {
         if !job_sent {
             let mut worker = ThreadWorker::new(card_name.clone());
 
-            if worker.add_job(name, &card_name, description, direction) {
+            if worker.add_job(name, &card_name, direction) {
                 self.workers.push(worker);
             }
         }
@@ -220,20 +209,17 @@ impl ThreadWorker {
                         WorkerJob::GetPcm {
                             name,
                             card_name,
-                            description,
                             direction,
                         } => match direction {
                             Direction::Playback => {
-                                let alsa_pcm =
-                                    AlsaPcm::new(&name, &card_name, &description, direction);
+                                let alsa_pcm = AlsaPcm::new(&name, &card_name, direction);
 
                                 if let Some(alsa_pcm) = alsa_pcm {
                                     playback_pcms.push(alsa_pcm);
                                 }
                             }
                             Direction::Capture => {
-                                let alsa_pcm =
-                                    AlsaPcm::new(&name, &card_name, &description, direction);
+                                let alsa_pcm = AlsaPcm::new(&name, &card_name, direction);
 
                                 if let Some(alsa_pcm) = alsa_pcm {
                                     capture_pcms.push(alsa_pcm);
@@ -252,18 +238,11 @@ impl ThreadWorker {
         }
     }
 
-    pub fn add_job(
-        &mut self,
-        name: &str,
-        card_name: &str,
-        description: &str,
-        direction: Direction,
-    ) -> bool {
+    pub fn add_job(&mut self, name: &str, card_name: &str, direction: Direction) -> bool {
         if let Some(sender) = self.job_sender.as_mut() {
             let job = WorkerJob::GetPcm {
                 name: name.to_string(),
                 card_name: card_name.to_string(),
-                description: description.to_string(),
                 direction,
             };
 
@@ -323,7 +302,7 @@ impl ValidConfiguration {
         let (buffer_time_min, buffer_time_max) =
             Self::get_buffer_time_range(&pcm.name, pcm.direction, format, rate, channels);
 
-        let fallback_buffer_time_ms = (buffer_time_max.abs_diff(buffer_time_min) / US_PER_MS) / 2;
+        let fallback_buffer_time_ms = (buffer_time_max / 2).max(buffer_time_min) / US_PER_MS;
 
         Self {
             name: pcm.name,
@@ -527,20 +506,17 @@ struct AlsaPcm {
 }
 
 impl AlsaPcm {
-    pub fn new(
-        name: &str,
-        card_name: &str,
-        description: &str,
-        direction: Direction,
-    ) -> Option<Self> {
+    pub fn new(name: &str, card_name: &str, direction: Direction) -> Option<Self> {
+        let mut description = String::new();
         let mut device_number: u32 = 0;
         let mut sub_device_number: u32 = 0;
-        let mut formats = Vec::with_capacity(9);
+        let mut formats = Vec::with_capacity(4);
         let mut rates = Vec::with_capacity(100);
         let mut channels = Vec::with_capacity(100);
 
         if let Ok(pcm) = PCM::new(name, direction, false) {
             if let Ok(info) = pcm.info() {
+                description = info.get_name().unwrap_or("NONE").to_string();
                 device_number = info.get_device();
                 sub_device_number = info.get_subdevice();
 
@@ -571,7 +547,6 @@ impl AlsaPcm {
                         }
 
                         let min_rate = hwp.get_rate_min().unwrap_or(MIN_RATE).max(MIN_RATE);
-
                         let max_rate = hwp.get_rate_max().unwrap_or(MAX_RATE).min(MAX_RATE);
 
                         for r in min_rate..=max_rate {
@@ -649,7 +624,7 @@ impl AlsaPcm {
 
         let mut pcm = AlsaPcm {
             name: name.to_string(),
-            description: description.to_string(),
+            description,
             direction,
             card_name: card_name.to_string(),
             device_number,
@@ -1161,13 +1136,7 @@ fn get_pcms() -> (Vec<AlsaPcm>, Vec<AlsaPcm>) {
             if let Some(name) = hint.name {
                 if name.starts_with("hw:") {
                     if let Some(direction) = hint.direction {
-                        let name = name.trim().to_string();
-                        let description = hint
-                            .desc
-                            .unwrap_or_else(|| "NONE".to_string())
-                            .replace("\n", " ");
-
-                        thread_manager.add_job(&name, &description, direction);
+                        thread_manager.add_job(&name, direction);
                     }
                 }
             }
@@ -1185,7 +1154,7 @@ fn get_rate_converters() -> Vec<String> {
             let mut converter = converter.display().to_string();
 
             converter = converter[converter.find(CONVERTERS_PREFIX).unwrap_or(0)
-                ..converter.find(".so").unwrap_or(converter.len())]
+                ..converter.find(".so").unwrap_or(converter.len() - 1)]
                 .replace(CONVERTERS_PREFIX, "")
                 .trim()
                 .to_string();
