@@ -136,7 +136,8 @@ impl ThreadManager {
     }
 
     pub fn add_job(&mut self, name: &str, direction: Direction) {
-        let card_name = name[name.find('=').unwrap_or(0)..name.find(',').unwrap_or(name.len())]
+        let card_name = name
+            [name.find('=').unwrap_or_default()..name.find(',').unwrap_or(name.len() - 1)]
             .replace('=', "")
             .trim()
             .to_string();
@@ -529,10 +530,19 @@ impl AlsaPcm {
                         }
 
                         if formats.is_empty() {
+                            let supported_formats = format!(
+                                "{:?}",
+                                FORMATS
+                                    .iter()
+                                    .map(|f| f.to_string())
+                                    .collect::<Vec<String>>()
+                            )
+                            .replace('"', "");
+
                             println!(
                                 "{}",
                                 format!(
-                                    "\n{name} does not support any formats supported by dmix/dsnoop."
+                                    "\n{name} does not support any formats supported by dmix/dsnoop ({supported_formats})."
                                 ).bold().yellow()
                             );
 
@@ -1153,7 +1163,7 @@ fn get_rate_converters() -> Vec<String> {
         for converter in converters.flatten() {
             let mut converter = converter.display().to_string();
 
-            converter = converter[converter.find(CONVERTERS_PREFIX).unwrap_or(0)
+            converter = converter[converter.find(CONVERTERS_PREFIX).unwrap_or_default()
                 ..converter.find(".so").unwrap_or(converter.len() - 1)]
                 .replace(CONVERTERS_PREFIX, "")
                 .trim()
@@ -1446,7 +1456,7 @@ fn main() {
 
     println!(
         "{}",
-        "\nPlease make sure that all Audio Playback and Capture Devices are not currently in use."
+        "\nPlease make sure that the Device(s) you wish to configure are not currently in use."
             .cyan()
             .bold()
     );
