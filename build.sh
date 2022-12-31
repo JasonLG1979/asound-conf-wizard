@@ -11,7 +11,7 @@ set -e
 cd /mnt/asound-conf-wizard
 
 # Build asound-conf-wizard
-cargo-deb --profile default --target $BUILD_TARGET
+cargo-deb --profile default --target $BUILD_TARGET -- --jobs "$(nproc)"
 
 cd /build/$BUILD_TARGET/debian
 
