@@ -1,11 +1,25 @@
-FROM debian:stable
+FROM rust:bullseye
 
-ENV INSIDE_DOCKER_CONTAINER 1
+ENV INSIDE_DOCKER_CONTAINER=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    DEBCONF_NOWARNINGS=yes \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_PATH="/usr/lib/arm-linux-gnueabihf/pkgconfig" \
+    PATH="/root/.cargo/bin/:$PATH" \
+    CARGO_INSTALL_ROOT="/root/.cargo" \
+    CARGO_TARGET_DIR="/build" \
+    CARGO_HOME="/build/cache"
 
-RUN dpkg --add-architecture arm64 \
-    && dpkg --add-architecture armhf
-
-RUN apt-get update \
+RUN mkdir /build \
+    && mkdir /.cargo \
+    && rustup target add aarch64-unknown-linux-gnu \
+    && rustup target add armv7-unknown-linux-gnueabihf \
+    && echo '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' > /.cargo/config \
+    && echo '[target.armv7-unknown-linux-gnueabihf]\nlinker = "arm-linux-gnueabihf-gcc"' >> /.cargo/config \
+    && cargo install --jobs "$(nproc)" cargo-deb \
+    && dpkg --add-architecture arm64 \
+    && dpkg --add-architecture armhf \
+    && apt-get update \
     && apt-get -y upgrade \
     && apt-get install -y --no-install-recommends \
         build-essential \
@@ -15,29 +29,6 @@ RUN apt-get update \
         crossbuild-essential-armhf \
         libasound2-dev:armhf \
         pkg-config \
-        ca-certificates \
-        curl \
         dpkg-dev \
         liblzma-dev \
     && rm -rf /var/lib/apt/lists/*
-
-ENV PKG_CONFIG_ALLOW_CROSS 1
-ENV PKG_CONFIG_PATH "/usr/lib/arm-linux-gnueabihf/pkgconfig"
-
-RUN mkdir /build
-
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
-ENV PATH "/root/.cargo/bin/:$PATH"
-ENV CARGO_INSTALL_ROOT "/root/.cargo"
-ENV CARGO_TARGET_DIR "/build"
-ENV CARGO_HOME "/build/cache"
-
-RUN rustup target add aarch64-unknown-linux-gnu \
-    && rustup target add armv7-unknown-linux-gnueabihf
-
-RUN mkdir /.cargo
-
-RUN cargo install cargo-deb
-
-RUN echo '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' > /.cargo/config \
-    && echo '[target.armv7-unknown-linux-gnueabihf]\nlinker = "arm-linux-gnueabihf-gcc"' >> /.cargo/config
