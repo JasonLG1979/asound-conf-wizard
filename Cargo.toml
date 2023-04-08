@@ -3,11 +3,11 @@ name = "asound-conf-wizard"
 description = "asound-conf-wizard"
 homepage = "https://github.com/JasonLG1979/asound-conf-wizard"
 repository = "https://github.com/JasonLG1979/asound-conf-wizard"
-version = "0.1.15"
+version = "0.1.17"
 edition = "2021"
 license = "MIT"
 authors = ["Jason Gray"]
-rust-version = "1.66"
+rust-version = "1.68"
 readme = "README.md"
 
 [[bin]]
